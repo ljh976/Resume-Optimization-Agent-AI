@@ -4,10 +4,11 @@ A focused, practical agent that analyzes and rewrites resumes to optimize their 
 
 ---
 
-## TL;DR ✅
-- Purpose: Optimize free-form resumes to target job descriptions (JDs) and provide role-matching recommendations.  
-- Tech: Python 3.11+, Streamlit UI, pytest for tests, lightweight prompt-driven LLM layer.  
-- Run locally: (Windows PowerShell)
+## Executive summary
+- Purpose: Automatically rewrite and optimize resumes to maximize alignment with specific job descriptions (JDs) and recommend best-fit roles.  
+- Audience: Engineers and hiring teams; ideal for portfolio review and technical evaluation.  
+- Tech stack: Python 3.11+, Streamlit UI, pytest, and a prompt-driven LLM layer.  
+- Quick start (Windows PowerShell):
 
 ```powershell
 # Activate virtual environment
