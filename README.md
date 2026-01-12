@@ -82,4 +82,4 @@ Design notes: Keep prompts and output shape stable (JSON schema) so consumers ca
 
 ---
 
-Thank you — this repository is small by design to showcase focused product thinking: prompt engineering, deterministic parsing, and end-to-end validation for a real HR/ATS problem.
+Thank you — this repository showcases focused product thinking and engineering rigor: prompt engineering, deterministic parsing, and end-to-end validation for real HR/ATS problems.
