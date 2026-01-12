@@ -1,11 +1,11 @@
 # Resume Optimization Agent (Portfolio)
 
-A focused, practical agent that analyzes and rewrites resumes to improve applicant-tracking-system (ATS) compatibility and job relevance. Built as a compact Streamlit app and a small LLM-driven core, it demonstrates prompt engineering, parsing, and deterministic post-processing suitable for production-grade resume tooling.
+A focused, practical agent that analyzes and rewrites resumes to optimize their match to specific job descriptions (JDs) and improve job relevance. Built as a compact Streamlit app and a small LLM-driven core, it demonstrates prompt engineering, parsing, and deterministic post-processing suitable for production-grade resume-to-JD optimization tooling.
 
 ---
 
 ## TL;DR ✅
-- Purpose: Turn free-form resumes into ATS-optimized, recruiter-friendly output and provide role-matching recommendations.  
+- Purpose: Optimize free-form resumes to target job descriptions (JDs) and provide role-matching recommendations.  
 - Tech: Python 3.11+, Streamlit UI, pytest for tests, lightweight prompt-driven LLM layer.  
 - Run locally: (Windows PowerShell)
 
@@ -21,7 +21,7 @@ python -m streamlit run app.py
 ---
 
 ## Why this project (portfolio focus) 💡
-- Real-world problem: Many qualified candidates are filtered out by keyword-based ATS; this agent applies semantic and structural edits to improve resume-match rates while preserving fidelity.  
+- Real-world problem: Candidates often miss opportunities because resumes and job descriptions are misaligned; this agent applies semantic and structural edits to improve resume-to-JD relevance while preserving fidelity.  
 - Engineering focus: Clear separation of concerns (UI, prompts, parsing, rendering) with deterministic outputs and unit tests to lock behavior.  
 - Auditability: Prompts and normalization logic are captured in `core/prompts.py` and `core/structure.py` so reviewers can trace behavior.
 
@@ -64,7 +64,7 @@ Design notes: Keep prompts and output shape stable (JSON schema) so consumers ca
 ---
 
 ## Examples & Output
-- The app produces a Markdown preview (for review), ATS-adjusted text, and a DOCX export suitable for recruiters and applicant tracking systems.
+- The app produces a Markdown preview (for review), JD-optimized text, and a DOCX export suitable for recruiters and hiring managers.
 - SKILLS lines are normalized into consistent categories and formatting to improve keyword matching.
 
 ---
@@ -82,4 +82,4 @@ Design notes: Keep prompts and output shape stable (JSON schema) so consumers ca
 
 ---
 
-Thank you — this repository showcases focused product thinking and engineering rigor: prompt engineering, deterministic parsing, and end-to-end validation for real HR/ATS problems.
+Thank you — this repository showcases focused product thinking and engineering rigor: prompt engineering, deterministic parsing, and end-to-end validation for real-world JD matching and resume optimization problems.
