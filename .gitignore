@@ -1,0 +1,11 @@
+venv/
+.venv/
+__pycache__/
+.resume_agent_state.json
+.env
+*.pyc
+.DS_Store
+/.vscode/
+/.idea/
+/.pytest_cache/
+result_*.docx
