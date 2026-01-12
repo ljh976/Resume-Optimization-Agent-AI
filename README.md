@@ -1,0 +1,85 @@
+# Resume Optimization Agent (Portfolio)
+
+A focused, practical agent that analyzes and rewrites resumes to improve applicant-tracking-system (ATS) compatibility and job relevance. Built as a compact Streamlit app and a small LLM-driven core, it demonstrates prompt engineering, parsing, and deterministic post-processing suitable for production-grade resume tooling.
+
+---
+
+## TL;DR ✅
+- Purpose: Turn free-form resumes into ATS-optimized, recruiter-friendly output and provide role-matching recommendations.  
+- Tech: Python 3.11+, Streamlit UI, pytest for tests, lightweight prompt-driven LLM layer.  
+- Run locally: (Windows PowerShell)
+
+```powershell
+# Activate virtual environment
+& .\venv\Scripts\Activate.ps1
+# Install dependencies
+python -m pip install -r requirements.txt
+# Run the app
+python -m streamlit run app.py
+```
+
+---
+
+## Why this project (portfolio focus) 💡
+- Real-world problem: Many qualified candidates are filtered out by keyword-based ATS; this agent applies semantic and structural edits to improve resume-match rates while preserving fidelity.  
+- Engineering focus: Clear separation of concerns (UI, prompts, parsing, rendering) with deterministic outputs and unit tests to lock behavior.  
+- Auditability: Prompts and normalization logic are captured in `core/prompts.py` and `core/structure.py` so reviewers can trace behavior.
+
+---
+
+## Features ✨
+- Clean Streamlit UI for interactive feedback and downloads (DOCX + optional PDF).  
+- Resume parsing rules that enforce strict SKILLS / EXPERIENCE formatting.  
+- Evaluate / score function returns a structured JSON (for testing and integration).  
+- Job recommendation pipeline with company normalization and score curation.  
+
+---
+
+## Architecture & Key Files 🔧
+- `app.py` — Streamlit UI + preview / export.  
+- `core/agent.py` — LLM client wrapper (generate/evaluate/rewrite helpers).  
+- `core/prompts.py` — Canonical prompts used by agents.  
+- `core/structure.py` — Parsing/splitting helper functions and business rules.  
+- `core/render.py` — DOCX generation for polished downloads.  
+- `core/job_seeker_agent.py` — Role matching and company whitelist logic.  
+
+Design notes: Keep prompts and output shape stable (JSON schema) so consumers can rely on structured output.
+
+---
+
+## Quick Development Guide 🧑‍💻
+- Setup (Windows PowerShell):
+  - `& .\venv\Scripts\Activate.ps1`  
+  - `python -m pip install -r requirements.txt`  
+  - Set `OPENAI_API_KEY` (or your LLM provider key) in environment variables.  
+- Run the app: `python -m streamlit run app.py`  
+- Tests: `python -m pytest -q` (we use `pytest` — keep tests fast and deterministic)  
+
+---
+
+## Testing & Quality ✅
+- Unit tests cover parsing, bold/format conversions, and evaluation result shapes.  
+- Keep tests small and repeatable; CI should run `pytest` on PRs.  
+
+---
+
+## Examples & Output
+- The app produces a Markdown preview (for review), ATS-adjusted text, and a DOCX export suitable for recruiters and applicant tracking systems.
+- SKILLS lines are normalized into consistent categories and formatting to improve keyword matching.
+
+---
+
+## Contribution & Style
+- Keep changes minimal and test-first.  
+- If you update prompt formats or output JSON shapes, add tests and update `core/structure.py` consumer code.  
+- Preserve canonical SKILLS/EXPERIENCE formats (see `core/structure.py` comments).
+
+---
+
+## License & Contact
+- [MIT License](LICENSE) (change as required).  
+- Maintainer: Junho (local repo). For portfolio review or questions, open an issue or contact the repo owner.
+
+---
+
+Thank you — this repository is small by design to showcase focused product thinking: prompt engineering, deterministic parsing, and end-to-end validation for a real HR/ATS problem.
