@@ -11,7 +11,7 @@ Focus on what you must preserve and where to make changes so edits are fast, saf
 - Parsing & rendering: `core/structure.py` (parsing, splitting roles, merging skills) and `core/render.py` (DOCX generation using python-docx).
 - Job-recommendation: `core/job_seeker_agent.py` — uses a JSON schema + post-processing (company whitelist + normalization).
 
-## Developer workflows (how to run & debug locally)
+## Developer workflows (how to run & debug)
 
 - Windows quick run: open Powershell in repo root and execute `run_resume_agent.bat`. It:
   - creates/activates `venv` if missing
