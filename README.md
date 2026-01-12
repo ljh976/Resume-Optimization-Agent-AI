@@ -1,4 +1,4 @@
-# Resume Optimization Agent (Portfolio)
+# Resume Optimization Agent
 
 A focused, practical agent that analyzes and rewrites resumes to optimize their match to specific job descriptions (JDs) and improve job relevance. Built as a compact Streamlit app and a small LLM-driven core, it demonstrates prompt engineering, parsing, and deterministic post-processing suitable for production-grade resume-to-JD optimization tooling.
 
@@ -6,7 +6,7 @@ A focused, practical agent that analyzes and rewrites resumes to optimize their 
 
 ## Executive summary
 - Purpose: Automatically rewrite and optimize resumes to maximize alignment with specific job descriptions (JDs) and recommend best-fit roles.  
-- Audience: Engineers and hiring teams; ideal for portfolio review and technical evaluation.  
+- Audience: Engineers and hiring teams; suitable for technical evaluation.  
 - Tech stack: Python 3.11+, Streamlit UI, pytest, and a prompt-driven LLM layer.  
 - Quick start (Windows PowerShell):
 
@@ -21,7 +21,7 @@ python -m streamlit run app.py
 
 ---
 
-## Why this project (portfolio focus) 💡
+## Why this project 💡
 - Real-world problem: Candidates often miss opportunities because resumes and job descriptions are misaligned; this agent applies semantic and structural edits to improve resume-to-JD relevance while preserving fidelity.  
 - Engineering focus: Clear separation of concerns (UI, prompts, parsing, rendering) with deterministic outputs and unit tests to lock behavior.  
 - Auditability: Prompts and normalization logic are captured in `core/prompts.py` and `core/structure.py` so reviewers can trace behavior.
@@ -79,7 +79,7 @@ Design notes: Keep prompts and output shape stable (JSON schema) so consumers ca
 
 ## License & Contact
 - [MIT License](LICENSE) (change as required).  
-- Maintainer: Junho (local repo). For portfolio review or questions, open an issue or contact the repo owner.
+- Maintainer: Junho (local repo). For questions or review, open an issue or contact the repo owner.
 
 ---
 
