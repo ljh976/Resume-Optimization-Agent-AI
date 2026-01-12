@@ -6,7 +6,7 @@ from core.render import render_docx
 # per-bullet LLM scorer removed to reduce LLM calls; use heuristic scoring if needed
 # static career pages list
 from core.career_pages import ALL_COMPANIES, CATEGORIZED
-# recommend_jobs 제거
+# recommend_jobs removed
 
 # PDF conversion removed; we estimate pages by word count only
 

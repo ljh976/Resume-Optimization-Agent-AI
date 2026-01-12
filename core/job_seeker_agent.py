@@ -32,7 +32,7 @@ JOB_MATCH_SCHEMA = {
     "required": ["results"]
 }
 
-# ✅ 허용 회사 리스트 (단일 리스트)
+# ✅ Allowed companies list (single set)
 ALLOWED_COMPANIES = {
     "Google",
     "Amazon",
@@ -60,7 +60,7 @@ ALLOWED_COMPANIES = {
     "Tesla",
 }
 
-# ✅ 회사명 alias 정규화
+# ✅ Company name alias normalization
 COMPANY_ALIASES = {
     "Alphabet": "Google",
     "Google LLC": "Google",
