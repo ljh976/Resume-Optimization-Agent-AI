@@ -2,6 +2,7 @@ import streamlit as st, tempfile, os, time, math
 from core.agent import generate, evaluate, rewrite, _heuristic_ats_score
 from core.structure import parse_resume, split_experience, merge_skills_a1
 from core.render import render_docx
+from core.job_seeker_agent import find_matching_roles
 # relevance scorer
 # per-bullet LLM scorer removed to reduce LLM calls; use heuristic scoring if needed
 # static career pages list
@@ -36,6 +37,10 @@ def _load_persisted_state():
                     fb = r.get('fb')
                     if resume_text is not None and fb is not None:
                         st.session_state.setdefault('result', (resume_text, fb))
+                if 'suggested_skills' in data and data.get('suggested_skills') is not None:
+                    st.session_state.setdefault('suggested_skills', data.get('suggested_skills') or [])
+                if 'generated_bullet_scores' in data and data.get('generated_bullet_scores') is not None:
+                    st.session_state.setdefault('generated_bullet_scores', data.get('generated_bullet_scores') or [])
     except Exception:
         pass
 
@@ -63,13 +68,39 @@ def _save_persisted_state():
             to_save['result'] = {'resume': resume_text, 'fb': fb_serializable}
         else:
             to_save['result'] = None
+        to_save['suggested_skills'] = st.session_state.get('suggested_skills')
+        to_save['generated_bullet_scores'] = st.session_state.get('generated_bullet_scores')
         with open(_STATE_PATH, 'w', encoding='utf-8') as f:
             json.dump(to_save, f, ensure_ascii=False)
     except Exception:
         pass
 
+def _clear_cached_result():
+    try:
+        st.session_state.pop('result', None)
+        st.session_state.pop('suggested_skills', None)
+        st.session_state.pop('generated_bullet_scores', None)
+    except Exception:
+        pass
+    try:
+        _save_persisted_state()
+    except Exception:
+        pass
+
+def _clear_inputs():
+    st.session_state['pending_input_clear'] = True
+    st.session_state['clear_inputs_notice'] = True
+
 # Load persisted values early so widgets pick them up
 _load_persisted_state()
+
+if st.session_state.pop('pending_input_clear', False):
+    st.session_state['jd_input'] = ''
+    st.session_state['master_input'] = ''
+    try:
+        _save_persisted_state()
+    except Exception:
+        pass
 
 # Default test_mode to True unless persisted otherwise
 st.session_state.setdefault('test_mode', True)
@@ -198,28 +229,34 @@ def _safe_rerun():
     Streamlit RerunException from known import paths. Falls back to toggling
     a session_state flag if rerun cannot be forced.
     """
-    try:
-        if hasattr(st, 'experimental_rerun'):
-            try:
-                st.experimental_rerun()
-                return
-            except Exception:
-                # fall through to exception-based rerun
-                pass
-        # Try known exception class locations
-        try:
-            from streamlit.runtime.scriptrunner.script_runner import RerunException
-        except Exception:
-            try:
-                from streamlit.script_runner.script_runner import RerunException
-            except Exception:
-                RerunException = None
-        if RerunException:
-            raise RerunException()
-    except Exception:
-        # Last-resort: toggle a session flag so the UI updates next run
-        st.session_state['_need_rerun'] = not st.session_state.get('_need_rerun', False)
+    if hasattr(st, 'experimental_rerun'):
+        st.experimental_rerun()
         return
+
+    # Try known exception class locations to force a rerun when experimental_rerun
+    # is unavailable (older Streamlit versions).
+    RerunException = None
+    rerun_ctx = None
+    for path in [
+        'streamlit.runtime.scriptrunner.script_runner',
+        'streamlit.script_runner.script_runner'
+    ]:
+        try:
+            module = __import__(path, fromlist=['RerunException'])
+            RerunException = getattr(module, 'RerunException', None)
+            if RerunException:
+                rerun_ctx = getattr(module, 'RerunData', None)
+                break
+        except Exception:
+            continue
+
+    if RerunException:
+        if rerun_ctx:
+            raise RerunException(rerun_ctx())
+        raise RerunException(None)
+
+    # Last resort: toggle a flag so next interaction triggers a rerun.
+    st.session_state['_need_rerun'] = not st.session_state.get('_need_rerun', False)
 
 # Create a two-column top layout: main inputs on the left, persistent
 # controls on the right (simulates a right-side sidebar)
@@ -283,63 +320,13 @@ with sidebar_col:
     test_mode = st.checkbox("Test mode (use cheapest LLM model)", value=True, help="Run using the fastest/cheapest model for LLM calls (still performs API calls).", disabled=st.session_state.get('running', False))
     # job-recommendation controls removed
 
-    # Quick debug: generate a test DOCX from a fixed sample string so the user
-    # can download and inspect a known-good .docx produced by `_get_docx_bytes`.
-    if st.button("Generate Test DOCX", key="gen_test_docx", disabled=st.session_state.get('running', False)):
-        sample = (
-            "John Q. Candidate\nSenior Software Engineer\n\n"
-            "SUMMARY\n"
-            "- 10+ years building distributed systems, data pipelines, and APIs.\n\n"
-            "EXPERIENCE\n"
-            "Acme Corp | Senior Engineer | 2019–2023 | Full-time\n"
-            "- Designed and implemented a scalable ETL pipeline that processed 10M events/day.\n\n"
-            "Globex Inc | Software Engineer | 2016–2019 | Full-time\n"
-            "- Improved service latency by 40% through profiling and targeted refactors.\n\n"
-            "SKILLS\n"
-            "Languages: Python, JavaScript, SQL\n"
-            "Tools: Docker, Kubernetes, AWS"
-        )
-        try:
-            b = _get_docx_bytes(sample)
-            if b:
-                st.session_state['test_docx_bytes'] = b
-                st.success("Test DOCX generated — use the download button below.")
-            else:
-                st.error("Failed to generate test DOCX.")
-        except Exception as e:
-            st.exception(e)
-
-    # Show download button if test DOCX bytes are available
-    if st.session_state.get('test_docx_bytes'):
-        st.download_button("Download Test DOCX", data=st.session_state.get('test_docx_bytes'), file_name="test_resume.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", key="download_test_docx")
-
-    # Debug: generate DOCX from current preview or master resume and show parse results
-    if st.button("Generate DOCX from Current Preview", key="gen_current_docx", disabled=st.session_state.get('running', False)):
-        # Prefer the optimized preview if present, otherwise fall back to master_input
-        result = st.session_state.get('result')
-        if result and isinstance(result, (list, tuple)) and len(result) >= 1:
-            current_text = result[0]
-        else:
-            current_text = st.session_state.get('master_input') or st.session_state.get('jd_input') or ""
-
-        try:
-            # Show parsed sections so we can see if parsing failed to find body sections
-            parsed = parse_resume(current_text)
-            roles_p = split_experience(parsed.get('EXPERIENCE', []))
-            skills_p = merge_skills_a1(parsed.get('SKILLS', []))
-            # Do not persist or show raw parse debug info in the UI.
-            # Generate a DOCX preview from the current text (no debug flags shown).
-            b = _get_docx_bytes(current_text)
-            if b:
-                st.session_state['current_debug_docx_bytes'] = b
-                st.success("DOCX generated from current text.")
-            else:
-                st.error("Failed to generate DOCX from current text.")
-        except Exception as e:
-            st.exception(e)
-
-    if st.session_state.get('current_debug_docx_bytes'):
-        st.download_button("Download Current Preview DOCX", data=st.session_state.get('current_debug_docx_bytes'), file_name="current_preview_resume.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", key="download_current_docx")
+    if st.button("Clear Cached Input", key="clear_inputs_btn", disabled=st.session_state.get('running', False)):
+        _clear_inputs()
+    if st.session_state.pop('clear_inputs_notice', False):
+        st.success("Cached inputs cleared.")
+    if st.button("Clear Cached Result", key="clear_cache_btn", disabled=st.session_state.get('running', False)):
+        _clear_cached_result()
+        st.success("Cached result cleared.")
 
     # Career pages listing moved below (rendered after Feedback section)
     # (placeholder here so controls stay grouped at top)
@@ -1025,6 +1012,46 @@ with main_col:
 
             # Company Career Pages moved out of the Preview (rendered separately below)
 
+        job_source_text = (st.session_state.get('master_input') or master or '').strip()
+        job_matches = []
+        job_match_error = None
+        if job_source_text:
+            try:
+                job_matches = find_matching_roles(job_source_text, max_results=6)
+            except Exception as exc:
+                job_match_error = str(exc)
+
+        with st.container():
+            st.markdown("### Job Recommendations")
+            if job_match_error:
+                st.warning("We couldn't generate job recommendations right now. Please try again in a moment.")
+            elif job_matches:
+                for idx, match in enumerate(job_matches, 1):
+                    title = match.get('title') or "Suggested Role"
+                    company = match.get('company') or "Company"
+                    score = match.get('match_score')
+                    reason = match.get('reason')
+                    url = match.get('url')
+                    cols = st.columns([4, 1])
+                    with cols[0]:
+                        st.markdown(f"**{idx}. {title} — {company}**")
+                        if reason:
+                            st.markdown(reason)
+                        if url:
+                            st.markdown(f"[View openings]({url})")
+                    with cols[1]:
+                        if score is not None:
+                            try:
+                                st.metric("Match", f"{int(score)} / 100")
+                            except Exception:
+                                st.metric("Match", str(score))
+                        else:
+                            st.metric("Match", "—")
+                    if idx != len(job_matches):
+                        st.markdown("---")
+            else:
+                st.info("Add or refine your Master Resume to unlock tailored job recommendations.")
+
         sections = parse_resume(resume)
         roles = split_experience(sections.get('EXPERIENCE') or sections.get('PROFESSIONAL EXPERIENCE') or [])
         merged_skills = merge_skills_a1(sections.get("SKILLS", []))
@@ -1144,12 +1171,6 @@ with main_col:
                         new_text, removed_by_chars, trim_entries = _ensure_char_limits(current_resume_text, fb, min_chars=1800, start_threshold=1900, target_max=1965, score_threshold=score_threshold_dynamic, max_removals_per_run=max_removals_dynamic)
                     else:
                         new_text, removed_by_chars, trim_entries = current_resume_text, 0, []
-                    # inform user trimming was constrained due to low ATS
-                    try:
-                        if fb and fb.get('ats_score') is not None and int(fb.get('ats_score')) < target:
-                            st.info('ATS is below target — trimming is conservative.')
-                    except Exception:
-                        pass
                     if removed_by_chars or trim_entries:
                         current_resume_text = new_text
                         try:

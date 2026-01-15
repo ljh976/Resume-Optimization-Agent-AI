@@ -18,6 +18,14 @@ def parse_resume(text):
         'EDUCATION', 'SKILLS', 'PROJECTS', 'CERTIFICATIONS', 'ACHIEVEMENTS'
     ])
 
+    def _looks_like_contact_line(s: str) -> bool:
+        lowered = (s or "").lower()
+        if any(token in lowered for token in ("@", "linkedin", "github", "http", "www")):
+            return True
+        if "|" in s:
+            return True
+        return any(ch.isdigit() for ch in s)
+
     sections["HEADER"] = []
     # After optional skip, next two lines are Name and Contact if present.
     # Only treat them as HEADER content if they are not themselves section headings.
@@ -25,8 +33,10 @@ def parse_resume(text):
         sections["HEADER"].append(lines[0])
     # Only treat the second line as header content if the first line is not itself
     # a canonical section heading (e.g., when document starts with "SKILLS/EXPERIENCE").
-    if len(lines) >= 2 and lines[0].strip().upper() not in canonical_headings and lines[1].strip().upper() not in canonical_headings and not lines[1].isupper():
-        sections["HEADER"].append(lines[1])
+    if len(lines) >= 2 and lines[0].strip().upper() not in canonical_headings and lines[1].strip().upper() not in canonical_headings:
+        second = lines[1]
+        if not second.isupper() or _looks_like_contact_line(second):
+            sections["HEADER"].append(second)
 
     # If the name/contact line(s) include a pipe-separated header (e.g.,
     # "John Doe | Software Engineer | City"), move the trailing pipe part

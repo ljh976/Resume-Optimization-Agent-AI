@@ -94,7 +94,15 @@ Return JSON:
   "ats_score": number (0-100),
   "verbal_feedback": string,
   "strengths": [string],
-  "weaknesses": [string]
+  "weaknesses": [string],
+  "bullet_scores": [
+    {
+      "id": string,
+      "bullet": string,
+      "score": integer 0-100,
+      "reason": string
+    }
+  ]
 }
 """
 
