@@ -7,7 +7,7 @@ A focused, practical agent that analyzes and rewrites resumes to optimize their 
 ## Executive summary
 - Purpose: Automatically rewrite and optimize resumes to maximize alignment with specific job descriptions (JDs) and recommend best-fit roles.  
 - Audience: Engineers and hiring teams; suitable for technical evaluation.  
-- Tech stack: Python 3.11+, Streamlit UI, pytest, and a prompt-driven LLM layer.  
+- Tech stack: Python 3.11+, Streamlit UI, pytest, LangChain (prescreen + header extraction), and a prompt-driven LLM layer.  
 - Quick start (Windows PowerShell):
 
 ```powershell
@@ -32,7 +32,9 @@ python -m streamlit run app.py
 - Clean Streamlit UI for interactive feedback and downloads (DOCX + optional PDF).  
 - Resume parsing rules that enforce strict SKILLS / EXPERIENCE formatting.  
 - Evaluate / score function returns a structured JSON (for testing and integration).  
-- Job recommendation pipeline with company normalization and score curation.  
+- LangChain-based pre-screening to stop low-signal runs early.  
+- Robust header extraction (name/email/GitHub/LinkedIn) to stabilize parsing with messy inputs.  
+- Cache safety so results are tied to the current JD + Master Resume.  
 
 ---
 
@@ -41,8 +43,10 @@ python -m streamlit run app.py
 - `core/agent.py` — LLM client wrapper (generate/evaluate/rewrite helpers).  
 - `core/prompts.py` — Canonical prompts used by agents.  
 - `core/structure.py` — Parsing/splitting helper functions and business rules.  
+- `core/prescreen.py` — LangChain prescreening gate before optimization loops.  
+- `core/header_extract.py` — LangChain header extraction for noisy inputs.  
 - `core/render.py` — DOCX generation for polished downloads.  
-- `core/job_seeker_agent.py` — Role matching and company whitelist logic.  
+- `core/job_seeker_agent.py` — Role matching and company whitelist logic (legacy).  
 
 Design notes: Keep prompts and output shape stable (JSON schema) so consumers can rely on structured output.
 
