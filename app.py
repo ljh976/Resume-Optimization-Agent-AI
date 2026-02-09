@@ -693,9 +693,9 @@ if run_clicked or run_requested:
                 fb_update.setdefault('prefer_shorten', False)
 
                 try:
-                    raw_rewrite = _safe_call(rewrite, jd, master, resume, fb_update, timeout=60)
+                    raw_rewrite = _safe_call(rewrite, jd, normalized_master, resume, fb_update, timeout=60)
                 except Exception:
-                    raw_rewrite = rewrite(jd, master, resume, fb_update)
+                    raw_rewrite = rewrite(jd, normalized_master, resume, fb_update)
                 parsed_rewrite, remaining_rewrite = _extract_json_blob_and_rest(raw_rewrite)
                 if parsed_rewrite is not None:
                     # attach any returned change log into feedback for UI
@@ -718,6 +718,23 @@ if run_clicked or run_requested:
             _report_error("Improvement loop failed", e)
 
         # Programmatic trimming / one-page reduction has been removed by user request.
+
+        # Final length optimization to keep resume under 2345 chars (LLM-first).
+        if len(resume) > 2345:
+            try:
+                fb_trim = dict(fb or {})
+                fb_trim['prefer_shorten'] = True
+                raw_trim = _safe_call(trimmer, jd, normalized_master, resume, fb_trim, timeout=60)
+                parsed_trim, remaining_trim = _extract_json_blob_and_rest(raw_trim)
+                if parsed_trim is not None and isinstance(parsed_trim, dict):
+                    fb.update(parsed_trim)
+                    resume = remaining_trim.strip()
+                else:
+                    resume = raw_trim
+            except Exception:
+                pass
+            if len(resume) > 2345:
+                resume = resume[:2345].rstrip()
 
         st.session_state.result = (resume, fb)
         try:
