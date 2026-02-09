@@ -38,6 +38,21 @@ python -m streamlit run app.py
 
 ---
 
+## Why LangChain here ✅
+We use LangChain for two targeted steps where structure and reliability matter most:
+
+1) **Pre-screening gate (`core/prescreen.py`)**
+  - **What:** A lightweight LLM step that estimates skill match and decides if optimization is viable.
+  - **Why needed:** Prevents costly rewrite loops when JD ↔ resume alignment is too weak.
+  - **Benefit:** Cuts wasted tokens and gives clear feedback early.
+
+2) **Header extraction (`core/header_extract.py`)**
+  - **What:** Extracts name/email/phone/LinkedIn/GitHub/location into a normalized `HEADER` block.
+  - **Why needed:** Real resumes vary wildly; stable header parsing reduces downstream format breakage.
+  - **Benefit:** More consistent parsing and fewer UI/rendering errors with messy inputs.
+
+---
+
 ## Architecture & Key Files 🔧
 - `app.py` — Streamlit UI + preview / export.  
 - `core/agent.py` — LLM client wrapper (generate/evaluate/rewrite helpers).  
