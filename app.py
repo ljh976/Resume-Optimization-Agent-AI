@@ -1,5 +1,7 @@
 import streamlit as st, tempfile, os, time, math
-from core.agent import generate, evaluate, rewrite, _heuristic_ats_score
+from core.agent import generate, evaluate, rewrite, trimmer, _heuristic_ats_score
+from core.header_extract import extract_header_info, build_header_lines
+from core.prescreen import prescreen_resume
 from core.structure import parse_resume, split_experience, merge_skills_a1
 from core.render import render_docx
 # relevance scorer
@@ -18,8 +20,15 @@ import json
 
 _STATE_PATH = os.path.join(os.getcwd(), '.resume_agent_state.json')
 
+def _inputs_hash(jd_value: str, master_value: str) -> str:
+    import hashlib
+    payload = (jd_value or "") + "\n---\n" + (master_value or "")
+    return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
 def _load_persisted_state():
     try:
+        if st.session_state.get('_state_loaded'):
+            return
         if os.path.exists(_STATE_PATH):
             with open(_STATE_PATH, 'r', encoding='utf-8') as f:
                 data = json.load(f)
@@ -29,13 +38,23 @@ def _load_persisted_state():
                     st.session_state.setdefault('jd_input', data.get('jd_input'))
                 if 'master_input' in data and data.get('master_input') is not None:
                     st.session_state.setdefault('master_input', data.get('master_input'))
-                # restore result if present
+                # restore result if present and input hash matches
                 if 'result' in data and isinstance(data.get('result'), dict):
                     r = data.get('result')
                     resume_text = r.get('resume')
                     fb = r.get('fb')
-                    if resume_text is not None and fb is not None:
+                    saved_hash = r.get('input_hash')
+                    current_hash = _inputs_hash(
+                        st.session_state.get('jd_input') or "",
+                        st.session_state.get('master_input') or ""
+                    )
+                    if saved_hash and saved_hash == current_hash and resume_text is not None and fb is not None:
                         st.session_state.setdefault('result', (resume_text, fb))
+                if 'suggested_skills' in data and data.get('suggested_skills') is not None:
+                    st.session_state.setdefault('suggested_skills', data.get('suggested_skills') or [])
+                if 'generated_bullet_scores' in data and data.get('generated_bullet_scores') is not None:
+                    st.session_state.setdefault('generated_bullet_scores', data.get('generated_bullet_scores') or [])
+        st.session_state['_state_loaded'] = True
     except Exception:
         pass
 
@@ -60,16 +79,62 @@ def _save_persisted_state():
                     fb_serializable = str(fb)
                 except Exception:
                     fb_serializable = None
-            to_save['result'] = {'resume': resume_text, 'fb': fb_serializable}
+            to_save['result'] = {
+                'resume': resume_text,
+                'fb': fb_serializable,
+                'input_hash': _inputs_hash(
+                    st.session_state.get('jd_input') or "",
+                    st.session_state.get('master_input') or ""
+                )
+            }
         else:
             to_save['result'] = None
+        to_save['suggested_skills'] = st.session_state.get('suggested_skills')
+        to_save['generated_bullet_scores'] = st.session_state.get('generated_bullet_scores')
         with open(_STATE_PATH, 'w', encoding='utf-8') as f:
             json.dump(to_save, f, ensure_ascii=False)
     except Exception:
         pass
 
+def _clear_cached_result():
+    try:
+        st.session_state.pop('result', None)
+        st.session_state.pop('suggested_skills', None)
+        st.session_state.pop('generated_bullet_scores', None)
+    except Exception:
+        pass
+    try:
+        _save_persisted_state()
+    except Exception:
+        pass
+
+def _on_input_change():
+    _clear_cached_result()
+    _save_persisted_state()
+
+def _normalize_master_with_header(master_text: str, header_info: dict) -> str:
+    header_lines = build_header_lines(header_info or {})
+    if len(header_lines) <= 1:
+        return master_text
+    if (master_text or "").lstrip().upper().startswith("HEADER"):
+        return master_text
+    header_block = "\n".join(header_lines)
+    return header_block + "\n" + master_text
+
+def _clear_inputs():
+    st.session_state['pending_input_clear'] = True
+    st.session_state['clear_inputs_notice'] = True
+
 # Load persisted values early so widgets pick them up
 _load_persisted_state()
+
+if st.session_state.pop('pending_input_clear', False):
+    st.session_state['jd_input'] = ''
+    st.session_state['master_input'] = ''
+    try:
+        _save_persisted_state()
+    except Exception:
+        pass
 
 # Default test_mode to True unless persisted otherwise
 st.session_state.setdefault('test_mode', True)
@@ -198,28 +263,34 @@ def _safe_rerun():
     Streamlit RerunException from known import paths. Falls back to toggling
     a session_state flag if rerun cannot be forced.
     """
-    try:
-        if hasattr(st, 'experimental_rerun'):
-            try:
-                st.experimental_rerun()
-                return
-            except Exception:
-                # fall through to exception-based rerun
-                pass
-        # Try known exception class locations
-        try:
-            from streamlit.runtime.scriptrunner.script_runner import RerunException
-        except Exception:
-            try:
-                from streamlit.script_runner.script_runner import RerunException
-            except Exception:
-                RerunException = None
-        if RerunException:
-            raise RerunException()
-    except Exception:
-        # Last-resort: toggle a session flag so the UI updates next run
-        st.session_state['_need_rerun'] = not st.session_state.get('_need_rerun', False)
+    if hasattr(st, 'experimental_rerun'):
+        st.experimental_rerun()
         return
+
+    # Try known exception class locations to force a rerun when experimental_rerun
+    # is unavailable (older Streamlit versions).
+    RerunException = None
+    rerun_ctx = None
+    for path in [
+        'streamlit.runtime.scriptrunner.script_runner',
+        'streamlit.script_runner.script_runner'
+    ]:
+        try:
+            module = __import__(path, fromlist=['RerunException'])
+            RerunException = getattr(module, 'RerunException', None)
+            if RerunException:
+                rerun_ctx = getattr(module, 'RerunData', None)
+                break
+        except Exception:
+            continue
+
+    if RerunException:
+        if rerun_ctx:
+            raise RerunException(rerun_ctx())
+        raise RerunException(None)
+
+    # Last resort: toggle a flag so next interaction triggers a rerun.
+    st.session_state['_need_rerun'] = not st.session_state.get('_need_rerun', False)
 
 # Create a two-column top layout: main inputs on the left, persistent
 # controls on the right (simulates a right-side sidebar)
@@ -242,14 +313,7 @@ with main_col:
             st.session_state['run_requested'] = True
         except Exception:
             st.session_state.__setitem__('run_requested', True)
-        try:
-            _safe_rerun()
-        except Exception:
-            try:
-                if hasattr(st, 'experimental_rerun'):
-                    st.experimental_rerun()
-            except Exception:
-                pass
+        # No rerun here; Streamlit will rerun after callback naturally.
 
     run_clicked = st.button("Run Agent", disabled=st.session_state.get('running', False), on_click=_on_run_click)
     # placeholder for status messages shown under the Run button (main column)
@@ -281,65 +345,24 @@ with sidebar_col:
     auto_trim = False
     show_trim_logs = False
     test_mode = st.checkbox("Test mode (use cheapest LLM model)", value=True, help="Run using the fastest/cheapest model for LLM calls (still performs API calls).", disabled=st.session_state.get('running', False))
+    prescreen_enabled = st.checkbox(
+        "Pre-screening enabled",
+        value=True,
+        help="Stop early if skill match is too low.",
+        disabled=st.session_state.get('running', False),
+        key="prescreen_enabled"
+    )
     # job-recommendation controls removed
 
-    # Quick debug: generate a test DOCX from a fixed sample string so the user
-    # can download and inspect a known-good .docx produced by `_get_docx_bytes`.
-    if st.button("Generate Test DOCX", key="gen_test_docx", disabled=st.session_state.get('running', False)):
-        sample = (
-            "John Q. Candidate\nSenior Software Engineer\n\n"
-            "SUMMARY\n"
-            "- 10+ years building distributed systems, data pipelines, and APIs.\n\n"
-            "EXPERIENCE\n"
-            "Acme Corp | Senior Engineer | 2019–2023 | Full-time\n"
-            "- Designed and implemented a scalable ETL pipeline that processed 10M events/day.\n\n"
-            "Globex Inc | Software Engineer | 2016–2019 | Full-time\n"
-            "- Improved service latency by 40% through profiling and targeted refactors.\n\n"
-            "SKILLS\n"
-            "Languages: Python, JavaScript, SQL\n"
-            "Tools: Docker, Kubernetes, AWS"
-        )
-        try:
-            b = _get_docx_bytes(sample)
-            if b:
-                st.session_state['test_docx_bytes'] = b
-                st.success("Test DOCX generated — use the download button below.")
-            else:
-                st.error("Failed to generate test DOCX.")
-        except Exception as e:
-            st.exception(e)
+    # Company recommendations are derived automatically from the resume.
 
-    # Show download button if test DOCX bytes are available
-    if st.session_state.get('test_docx_bytes'):
-        st.download_button("Download Test DOCX", data=st.session_state.get('test_docx_bytes'), file_name="test_resume.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", key="download_test_docx")
-
-    # Debug: generate DOCX from current preview or master resume and show parse results
-    if st.button("Generate DOCX from Current Preview", key="gen_current_docx", disabled=st.session_state.get('running', False)):
-        # Prefer the optimized preview if present, otherwise fall back to master_input
-        result = st.session_state.get('result')
-        if result and isinstance(result, (list, tuple)) and len(result) >= 1:
-            current_text = result[0]
-        else:
-            current_text = st.session_state.get('master_input') or st.session_state.get('jd_input') or ""
-
-        try:
-            # Show parsed sections so we can see if parsing failed to find body sections
-            parsed = parse_resume(current_text)
-            roles_p = split_experience(parsed.get('EXPERIENCE', []))
-            skills_p = merge_skills_a1(parsed.get('SKILLS', []))
-            # Do not persist or show raw parse debug info in the UI.
-            # Generate a DOCX preview from the current text (no debug flags shown).
-            b = _get_docx_bytes(current_text)
-            if b:
-                st.session_state['current_debug_docx_bytes'] = b
-                st.success("DOCX generated from current text.")
-            else:
-                st.error("Failed to generate DOCX from current text.")
-        except Exception as e:
-            st.exception(e)
-
-    if st.session_state.get('current_debug_docx_bytes'):
-        st.download_button("Download Current Preview DOCX", data=st.session_state.get('current_debug_docx_bytes'), file_name="current_preview_resume.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", key="download_current_docx")
+    if st.button("Clear Cached Input", key="clear_inputs_btn", disabled=st.session_state.get('running', False)):
+        _clear_inputs()
+    if st.session_state.pop('clear_inputs_notice', False):
+        st.success("Cached inputs cleared.")
+    if st.button("Clear Cached Result", key="clear_cache_btn", disabled=st.session_state.get('running', False)):
+        _clear_cached_result()
+        st.success("Cached result cleared.")
 
     # Career pages listing moved below (rendered after Feedback section)
     # (placeholder here so controls stay grouped at top)
@@ -359,6 +382,8 @@ if run_clicked or run_requested:
         # prevent double runs and reset summary-fix attempt for this run
         st.session_state['running'] = True
         st.session_state['summary_fix_attempted'] = False
+        st.session_state['prescreen_result'] = None
+        _clear_cached_result()
         # progress UI: small progress bar and elapsed timer (persist via session_state)
         st.session_state['run_start_ts'] = time.time()
         st.session_state['progress_pct'] = 0
@@ -455,6 +480,43 @@ if run_clicked or run_requested:
             # Instead of stopping, fall back to offline heuristic mode so the app remains usable.
             status_placeholder.warning(f"OpenAI API probe failed: {probe_msg} — continuing in offline mode (no LLM).")
             offline_mode = True
+        st.session_state["offline_mode"] = offline_mode
+
+        # Extract header info first to stabilize parsing for different input formats
+        try:
+            header_info = extract_header_info(master, use_llm=not offline_mode)
+        except Exception:
+            header_info = extract_header_info(master, use_llm=False)
+        normalized_master = _normalize_master_with_header(master, header_info)
+
+        # Pre-screening (skill match) before any optimization loop
+        if prescreen_enabled:
+            try:
+                _update_progress(7, "Pre-screening")
+                prescreen = prescreen_resume(jd, master, use_llm=not offline_mode)
+            except Exception:
+                prescreen = prescreen_resume(jd, master, use_llm=False)
+            st.session_state['prescreen_result'] = prescreen
+            if not prescreen.get("viable"):
+                status_placeholder.warning(
+                    f"Pre-screening stopped (skill match {prescreen.get('skill_match_pct', 0)}%). "
+                    "Matching elements are too limited to optimize reliably."
+                )
+                tips = prescreen.get("tips") or []
+                for t in tips[:2]:
+                    status_placeholder.info(t)
+                st.session_state['running'] = False
+                _safe_rerun()
+                st.stop()
+            else:
+                try:
+                    status_placeholder.write(
+                        f"Pre-screening passed (skill match {prescreen.get('skill_match_pct', 0)}%)."
+                    )
+                except Exception:
+                    pass
+        else:
+            st.session_state['prescreen_result'] = None
 
         # If test mode is enabled, override the model to a cheap/fast model for all LLM calls
         model_overridden = False
@@ -469,11 +531,11 @@ if run_clicked or run_requested:
                 import json
                 status_placeholder.warning("Offline mode: skipping LLM generate(); using MASTER as draft.")
                 _update_progress(10, "Offline draft")
-                raw = json.dumps({"suggested_skills": [], "bullet_scores": []}) + "\n" + master
+                raw = json.dumps({"suggested_skills": [], "bullet_scores": []}) + "\n" + normalized_master
             else:
                 status_placeholder.info("Calling LLM generate() (timeout 60s)...")
                 _update_progress(10, "Calling generator")
-                raw = _safe_call(generate, jd, master, timeout=60)
+                raw = _safe_call(generate, jd, normalized_master, timeout=60)
                 status_placeholder.success("Generator returned.")
                 _update_progress(15, "Initial draft generated")
         except TimeoutError as e:
@@ -542,9 +604,9 @@ if run_clicked or run_requested:
                 fb_fix['preserve_style'] = True
                 fb_fix['prefer_shorten'] = True
                 try:
-                    raw_fix = _safe_call(rewrite, jd, master, resume, fb_fix, timeout=60)
+                    raw_fix = _safe_call(rewrite, jd, normalized_master, resume, fb_fix, timeout=60)
                 except Exception:
-                    raw_fix = rewrite(jd, master, resume, fb_fix)
+                    raw_fix = rewrite(jd, normalized_master, resume, fb_fix)
                 st.session_state['summary_fix_attempted'] = True
                 # try to extract JSON then resume text (reuse existing parser)
                 def _extract_json_blob_local2(s: str):
@@ -683,6 +745,18 @@ if run_clicked or run_requested:
 with sidebar_col:
     # Feedback section (shows recruiter feedback + bullet scores/change log)
     st.header("Feedback")
+    ps = st.session_state.get("prescreen_result") or None
+    if ps:
+        with st.expander("Pre-screening", expanded=True):
+            st.write(f"Skill match: {ps.get('skill_match_pct', 0)}%")
+            reasons = ps.get("reasons") or []
+            for r in reasons[:3]:
+                st.write("- " + r)
+            tips = ps.get("tips") or []
+            if tips:
+                st.markdown("**Tips to improve match**")
+                for t in tips[:2]:
+                    st.write("- " + t)
     if "result" in st.session_state:
         resume, fb = st.session_state.result
         with st.expander("Recruiter Feedback", expanded=True):
@@ -889,7 +963,7 @@ with main_col:
                                 for role in roles:
                                     hdr_line = []
                                     if role.get('company'):
-                                        hdr_line.append(role.get('company'))
+                                        hdr_line.append(f"**{role.get('company')}**")
                                     if role.get('title'):
                                         hdr_line.append(role.get('title'))
                                     if role.get('meta'):
@@ -1025,6 +1099,7 @@ with main_col:
 
             # Company Career Pages moved out of the Preview (rendered separately below)
 
+
         sections = parse_resume(resume)
         roles = split_experience(sections.get('EXPERIENCE') or sections.get('PROFESSIONAL EXPERIENCE') or [])
         merged_skills = merge_skills_a1(sections.get("SKILLS", []))
@@ -1144,12 +1219,6 @@ with main_col:
                         new_text, removed_by_chars, trim_entries = _ensure_char_limits(current_resume_text, fb, min_chars=1800, start_threshold=1900, target_max=1965, score_threshold=score_threshold_dynamic, max_removals_per_run=max_removals_dynamic)
                     else:
                         new_text, removed_by_chars, trim_entries = current_resume_text, 0, []
-                    # inform user trimming was constrained due to low ATS
-                    try:
-                        if fb and fb.get('ats_score') is not None and int(fb.get('ats_score')) < target:
-                            st.info('ATS is below target — trimming is conservative.')
-                    except Exception:
-                        pass
                     if removed_by_chars or trim_entries:
                         current_resume_text = new_text
                         try:
@@ -1263,9 +1332,9 @@ with main_col:
                     except Exception:
                         pass
                     try:
-                        raw_repop = _safe_call(rewrite, jd, master, current_resume_text, fb_repop, timeout=60)
+                        raw_repop = _safe_call(rewrite, jd, normalized_master, current_resume_text, fb_repop, timeout=60)
                     except Exception:
-                        raw_repop = rewrite(jd, master, current_resume_text, fb_repop)
+                        raw_repop = rewrite(jd, normalized_master, current_resume_text, fb_repop)
                     parsed_repop, remaining_repop = _extract_json_blob_local2(raw_repop)
                     tentative = remaining_repop.strip() if parsed_repop is not None else raw_repop
 

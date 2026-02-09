@@ -5,13 +5,28 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 import logging
+import re
 
 # NOTE: bolding and NLP-based keyword extraction removed per user request.
+
+def _convert_markdown_bold_to_markers(text: str) -> str:
+    """Translate simple Markdown bold (**text**) into our explicit marker format."""
+    if not text or "**" not in text:
+        return text
+
+    pattern = re.compile(r"\*\*(.+?)\*\*")
+
+    def repl(match):
+        return "{BOLD_START}" + match.group(1) + "{BOLD_END}"
+
+    return pattern.sub(repl, text)
+
 
 def _split_marked_segments(text: str):
     """Split a string by {BOLD_START}/{BOLD_END} markers into (segment, bold_bool) pairs.
     Only honors explicit markers; returns original text as a single non-bold segment if markers are absent.
     """
+    text = _convert_markdown_bold_to_markers(text)
     if "{BOLD_START}" in text and "{BOLD_END}" in text:
         parts = []
         s = text
@@ -43,6 +58,22 @@ def _split_marked_segments(text: str):
         return merged
     return [(text, False)]
 
+
+
+
+def _add_marked_runs(paragraph, text: str, *, font_name: str = "Cambria", font_size: int = 11, bold: bool = False, italic: bool = False):
+    """Add runs to a paragraph, honoring {BOLD_START}/{BOLD_END} markers for selective bolding."""
+    if text is None:
+        return
+    for seg_text, seg_bold in _split_marked_segments(text):
+        if not seg_text:
+            continue
+        run = paragraph.add_run(seg_text)
+        run.font.name = font_name
+        run.font.size = Pt(font_size)
+        run.bold = bool(seg_bold or bold)
+        if italic:
+            run.italic = True
 
 
 
@@ -81,13 +112,10 @@ def render_docx(path, sections, roles, merged_skills):
 
     # --- NAME ---
     if name:
-        p = doc.add_paragraph(name)
+        p = doc.add_paragraph()
         _tight(p)
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        r = p.runs[0]
-        r.font.name = "Cambria"
-        r.font.size = Pt(20)
-        r.bold = True
+        _add_marked_runs(p, name, font_size=20, bold=True)
 
     # --- CONTACT LINE WITH HYPERLINKS ---
     if contact:
@@ -103,9 +131,7 @@ def render_docx(path, sections, roles, merged_skills):
             elif "linkedin.com" in lower:
                 _add_hyperlink(p, "LinkedIn", "https://" + lower.replace("https://", "").replace("http://", ""))
             else:
-                r = p.add_run(part)
-                r.font.name = "Cambria"
-                r.font.size = Pt(11)
+                _add_marked_runs(p, part, font_size=11)
 
             if idx < len(parts) - 1:
                 r = p.add_run(" | ")
@@ -128,23 +154,18 @@ def render_docx(path, sections, roles, merged_skills):
 
         if sec == "EXPERIENCE":
             for role in roles:
-                p = doc.add_paragraph(role["company"])
+                p = doc.add_paragraph()
                 _tight(p, before=6, after=0)
-                r = p.runs[0]
-                r.font.name = "Cambria"
-                r.font.size = Pt(11)
-                r.bold = True
-
-                p = doc.add_paragraph(role["meta"])
-                _tight(p)
-                r = p.runs[0]
-                r.font.name = "Cambria"
-                r.font.size = Pt(11)
-                r.italic = True
+                header_parts = []
+                if role.get("company"):
+                    header_parts.append("{BOLD_START}" + role.get("company") + "{BOLD_END}")
+                if role.get("meta"):
+                    header_parts.append(role.get("meta"))
+                header_line = " | ".join([part.strip() for part in header_parts if part])
+                _add_marked_runs(p, header_line)
 
                 for b in role["bullets"]:
                     # Render bullets honoring explicit {BOLD_START}/{BOLD_END} markers only
-                    segments = _split_marked_segments(b)
                     p = doc.add_paragraph()
                     _tight(p)
                     p.paragraph_format.left_indent = Pt(18)
@@ -153,32 +174,20 @@ def render_docx(path, sections, roles, merged_skills):
                     r_sym.font.name = "Cambria"
                     r_sym.font.size = Pt(11)
                     # add segments preserving bold flags
-                    for seg_text, is_b in segments:
-                        r = p.add_run(seg_text)
-                        r.font.name = "Cambria"
-                        r.font.size = Pt(11)
-                        if is_b:
-                            r.bold = True
+                    _add_marked_runs(p, b)
 
         elif sec == "SKILLS":
             for line in merged_skills:
                 p = doc.add_paragraph()
                 _tight(p)
                 cat, rest = line.split(":", 1)
-                r1 = p.add_run(cat + ": ")
-                r1.font.name = "Cambria"
-                r1.font.size = Pt(11)
-                r1.bold = True
-                r2 = p.add_run(rest.strip())
-                r2.font.name = "Cambria"
-                r2.font.size = Pt(11)
+                _add_marked_runs(p, cat + ": ", bold=True)
+                _add_marked_runs(p, rest.strip())
 
         else:
             for line in sections[sec]:
-                p = doc.add_paragraph(line)
+                p = doc.add_paragraph()
                 _tight(p)
-                r = p.runs[0]
-                r.font.name = "Cambria"
-                r.font.size = Pt(11)
+                _add_marked_runs(p, line)
 
     doc.save(path)
