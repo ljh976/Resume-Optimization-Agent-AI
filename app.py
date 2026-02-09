@@ -1,8 +1,9 @@
 import streamlit as st, tempfile, os, time, math
-from core.agent import generate, evaluate, rewrite, _heuristic_ats_score
+from core.agent import generate, evaluate, rewrite, trimmer, _heuristic_ats_score
+from core.header_extract import extract_header_info, build_header_lines
+from core.prescreen import prescreen_resume
 from core.structure import parse_resume, split_experience, merge_skills_a1
 from core.render import render_docx
-from core.job_seeker_agent import find_matching_roles
 # relevance scorer
 # per-bullet LLM scorer removed to reduce LLM calls; use heuristic scoring if needed
 # static career pages list
@@ -19,8 +20,15 @@ import json
 
 _STATE_PATH = os.path.join(os.getcwd(), '.resume_agent_state.json')
 
+def _inputs_hash(jd_value: str, master_value: str) -> str:
+    import hashlib
+    payload = (jd_value or "") + "\n---\n" + (master_value or "")
+    return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
 def _load_persisted_state():
     try:
+        if st.session_state.get('_state_loaded'):
+            return
         if os.path.exists(_STATE_PATH):
             with open(_STATE_PATH, 'r', encoding='utf-8') as f:
                 data = json.load(f)
@@ -30,17 +38,23 @@ def _load_persisted_state():
                     st.session_state.setdefault('jd_input', data.get('jd_input'))
                 if 'master_input' in data and data.get('master_input') is not None:
                     st.session_state.setdefault('master_input', data.get('master_input'))
-                # restore result if present
+                # restore result if present and input hash matches
                 if 'result' in data and isinstance(data.get('result'), dict):
                     r = data.get('result')
                     resume_text = r.get('resume')
                     fb = r.get('fb')
-                    if resume_text is not None and fb is not None:
+                    saved_hash = r.get('input_hash')
+                    current_hash = _inputs_hash(
+                        st.session_state.get('jd_input') or "",
+                        st.session_state.get('master_input') or ""
+                    )
+                    if saved_hash and saved_hash == current_hash and resume_text is not None and fb is not None:
                         st.session_state.setdefault('result', (resume_text, fb))
                 if 'suggested_skills' in data and data.get('suggested_skills') is not None:
                     st.session_state.setdefault('suggested_skills', data.get('suggested_skills') or [])
                 if 'generated_bullet_scores' in data and data.get('generated_bullet_scores') is not None:
                     st.session_state.setdefault('generated_bullet_scores', data.get('generated_bullet_scores') or [])
+        st.session_state['_state_loaded'] = True
     except Exception:
         pass
 
@@ -65,7 +79,14 @@ def _save_persisted_state():
                     fb_serializable = str(fb)
                 except Exception:
                     fb_serializable = None
-            to_save['result'] = {'resume': resume_text, 'fb': fb_serializable}
+            to_save['result'] = {
+                'resume': resume_text,
+                'fb': fb_serializable,
+                'input_hash': _inputs_hash(
+                    st.session_state.get('jd_input') or "",
+                    st.session_state.get('master_input') or ""
+                )
+            }
         else:
             to_save['result'] = None
         to_save['suggested_skills'] = st.session_state.get('suggested_skills')
@@ -86,6 +107,19 @@ def _clear_cached_result():
         _save_persisted_state()
     except Exception:
         pass
+
+def _on_input_change():
+    _clear_cached_result()
+    _save_persisted_state()
+
+def _normalize_master_with_header(master_text: str, header_info: dict) -> str:
+    header_lines = build_header_lines(header_info or {})
+    if len(header_lines) <= 1:
+        return master_text
+    if (master_text or "").lstrip().upper().startswith("HEADER"):
+        return master_text
+    header_block = "\n".join(header_lines)
+    return header_block + "\n" + master_text
 
 def _clear_inputs():
     st.session_state['pending_input_clear'] = True
@@ -279,14 +313,7 @@ with main_col:
             st.session_state['run_requested'] = True
         except Exception:
             st.session_state.__setitem__('run_requested', True)
-        try:
-            _safe_rerun()
-        except Exception:
-            try:
-                if hasattr(st, 'experimental_rerun'):
-                    st.experimental_rerun()
-            except Exception:
-                pass
+        # No rerun here; Streamlit will rerun after callback naturally.
 
     run_clicked = st.button("Run Agent", disabled=st.session_state.get('running', False), on_click=_on_run_click)
     # placeholder for status messages shown under the Run button (main column)
@@ -318,7 +345,16 @@ with sidebar_col:
     auto_trim = False
     show_trim_logs = False
     test_mode = st.checkbox("Test mode (use cheapest LLM model)", value=True, help="Run using the fastest/cheapest model for LLM calls (still performs API calls).", disabled=st.session_state.get('running', False))
+    prescreen_enabled = st.checkbox(
+        "Pre-screening enabled",
+        value=True,
+        help="Stop early if skill match is too low.",
+        disabled=st.session_state.get('running', False),
+        key="prescreen_enabled"
+    )
     # job-recommendation controls removed
+
+    # Company recommendations are derived automatically from the resume.
 
     if st.button("Clear Cached Input", key="clear_inputs_btn", disabled=st.session_state.get('running', False)):
         _clear_inputs()
@@ -346,6 +382,8 @@ if run_clicked or run_requested:
         # prevent double runs and reset summary-fix attempt for this run
         st.session_state['running'] = True
         st.session_state['summary_fix_attempted'] = False
+        st.session_state['prescreen_result'] = None
+        _clear_cached_result()
         # progress UI: small progress bar and elapsed timer (persist via session_state)
         st.session_state['run_start_ts'] = time.time()
         st.session_state['progress_pct'] = 0
@@ -442,6 +480,43 @@ if run_clicked or run_requested:
             # Instead of stopping, fall back to offline heuristic mode so the app remains usable.
             status_placeholder.warning(f"OpenAI API probe failed: {probe_msg} — continuing in offline mode (no LLM).")
             offline_mode = True
+        st.session_state["offline_mode"] = offline_mode
+
+        # Extract header info first to stabilize parsing for different input formats
+        try:
+            header_info = extract_header_info(master, use_llm=not offline_mode)
+        except Exception:
+            header_info = extract_header_info(master, use_llm=False)
+        normalized_master = _normalize_master_with_header(master, header_info)
+
+        # Pre-screening (skill match) before any optimization loop
+        if prescreen_enabled:
+            try:
+                _update_progress(7, "Pre-screening")
+                prescreen = prescreen_resume(jd, master, use_llm=not offline_mode)
+            except Exception:
+                prescreen = prescreen_resume(jd, master, use_llm=False)
+            st.session_state['prescreen_result'] = prescreen
+            if not prescreen.get("viable"):
+                status_placeholder.warning(
+                    f"Pre-screening stopped (skill match {prescreen.get('skill_match_pct', 0)}%). "
+                    "Matching elements are too limited to optimize reliably."
+                )
+                tips = prescreen.get("tips") or []
+                for t in tips[:2]:
+                    status_placeholder.info(t)
+                st.session_state['running'] = False
+                _safe_rerun()
+                st.stop()
+            else:
+                try:
+                    status_placeholder.write(
+                        f"Pre-screening passed (skill match {prescreen.get('skill_match_pct', 0)}%)."
+                    )
+                except Exception:
+                    pass
+        else:
+            st.session_state['prescreen_result'] = None
 
         # If test mode is enabled, override the model to a cheap/fast model for all LLM calls
         model_overridden = False
@@ -456,11 +531,11 @@ if run_clicked or run_requested:
                 import json
                 status_placeholder.warning("Offline mode: skipping LLM generate(); using MASTER as draft.")
                 _update_progress(10, "Offline draft")
-                raw = json.dumps({"suggested_skills": [], "bullet_scores": []}) + "\n" + master
+                raw = json.dumps({"suggested_skills": [], "bullet_scores": []}) + "\n" + normalized_master
             else:
                 status_placeholder.info("Calling LLM generate() (timeout 60s)...")
                 _update_progress(10, "Calling generator")
-                raw = _safe_call(generate, jd, master, timeout=60)
+                raw = _safe_call(generate, jd, normalized_master, timeout=60)
                 status_placeholder.success("Generator returned.")
                 _update_progress(15, "Initial draft generated")
         except TimeoutError as e:
@@ -529,9 +604,9 @@ if run_clicked or run_requested:
                 fb_fix['preserve_style'] = True
                 fb_fix['prefer_shorten'] = True
                 try:
-                    raw_fix = _safe_call(rewrite, jd, master, resume, fb_fix, timeout=60)
+                    raw_fix = _safe_call(rewrite, jd, normalized_master, resume, fb_fix, timeout=60)
                 except Exception:
-                    raw_fix = rewrite(jd, master, resume, fb_fix)
+                    raw_fix = rewrite(jd, normalized_master, resume, fb_fix)
                 st.session_state['summary_fix_attempted'] = True
                 # try to extract JSON then resume text (reuse existing parser)
                 def _extract_json_blob_local2(s: str):
@@ -670,6 +745,18 @@ if run_clicked or run_requested:
 with sidebar_col:
     # Feedback section (shows recruiter feedback + bullet scores/change log)
     st.header("Feedback")
+    ps = st.session_state.get("prescreen_result") or None
+    if ps:
+        with st.expander("Pre-screening", expanded=True):
+            st.write(f"Skill match: {ps.get('skill_match_pct', 0)}%")
+            reasons = ps.get("reasons") or []
+            for r in reasons[:3]:
+                st.write("- " + r)
+            tips = ps.get("tips") or []
+            if tips:
+                st.markdown("**Tips to improve match**")
+                for t in tips[:2]:
+                    st.write("- " + t)
     if "result" in st.session_state:
         resume, fb = st.session_state.result
         with st.expander("Recruiter Feedback", expanded=True):
@@ -876,7 +963,7 @@ with main_col:
                                 for role in roles:
                                     hdr_line = []
                                     if role.get('company'):
-                                        hdr_line.append(role.get('company'))
+                                        hdr_line.append(f"**{role.get('company')}**")
                                     if role.get('title'):
                                         hdr_line.append(role.get('title'))
                                     if role.get('meta'):
@@ -1012,45 +1099,6 @@ with main_col:
 
             # Company Career Pages moved out of the Preview (rendered separately below)
 
-        job_source_text = (st.session_state.get('master_input') or master or '').strip()
-        job_matches = []
-        job_match_error = None
-        if job_source_text:
-            try:
-                job_matches = find_matching_roles(job_source_text, max_results=6)
-            except Exception as exc:
-                job_match_error = str(exc)
-
-        with st.container():
-            st.markdown("### Job Recommendations")
-            if job_match_error:
-                st.warning("We couldn't generate job recommendations right now. Please try again in a moment.")
-            elif job_matches:
-                for idx, match in enumerate(job_matches, 1):
-                    title = match.get('title') or "Suggested Role"
-                    company = match.get('company') or "Company"
-                    score = match.get('match_score')
-                    reason = match.get('reason')
-                    url = match.get('url')
-                    cols = st.columns([4, 1])
-                    with cols[0]:
-                        st.markdown(f"**{idx}. {title} — {company}**")
-                        if reason:
-                            st.markdown(reason)
-                        if url:
-                            st.markdown(f"[View openings]({url})")
-                    with cols[1]:
-                        if score is not None:
-                            try:
-                                st.metric("Match", f"{int(score)} / 100")
-                            except Exception:
-                                st.metric("Match", str(score))
-                        else:
-                            st.metric("Match", "—")
-                    if idx != len(job_matches):
-                        st.markdown("---")
-            else:
-                st.info("Add or refine your Master Resume to unlock tailored job recommendations.")
 
         sections = parse_resume(resume)
         roles = split_experience(sections.get('EXPERIENCE') or sections.get('PROFESSIONAL EXPERIENCE') or [])
@@ -1284,9 +1332,9 @@ with main_col:
                     except Exception:
                         pass
                     try:
-                        raw_repop = _safe_call(rewrite, jd, master, current_resume_text, fb_repop, timeout=60)
+                        raw_repop = _safe_call(rewrite, jd, normalized_master, current_resume_text, fb_repop, timeout=60)
                     except Exception:
-                        raw_repop = rewrite(jd, master, current_resume_text, fb_repop)
+                        raw_repop = rewrite(jd, normalized_master, current_resume_text, fb_repop)
                     parsed_repop, remaining_repop = _extract_json_blob_local2(raw_repop)
                     tentative = remaining_repop.strip() if parsed_repop is not None else raw_repop
 

@@ -5,13 +5,28 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 import logging
+import re
 
 # NOTE: bolding and NLP-based keyword extraction removed per user request.
+
+def _convert_markdown_bold_to_markers(text: str) -> str:
+    """Translate simple Markdown bold (**text**) into our explicit marker format."""
+    if not text or "**" not in text:
+        return text
+
+    pattern = re.compile(r"\*\*(.+?)\*\*")
+
+    def repl(match):
+        return "{BOLD_START}" + match.group(1) + "{BOLD_END}"
+
+    return pattern.sub(repl, text)
+
 
 def _split_marked_segments(text: str):
     """Split a string by {BOLD_START}/{BOLD_END} markers into (segment, bold_bool) pairs.
     Only honors explicit markers; returns original text as a single non-bold segment if markers are absent.
     """
+    text = _convert_markdown_bold_to_markers(text)
     if "{BOLD_START}" in text and "{BOLD_END}" in text:
         parts = []
         s = text
@@ -143,7 +158,7 @@ def render_docx(path, sections, roles, merged_skills):
                 _tight(p, before=6, after=0)
                 header_parts = []
                 if role.get("company"):
-                    header_parts.append(role.get("company"))
+                    header_parts.append("{BOLD_START}" + role.get("company") + "{BOLD_END}")
                 if role.get("meta"):
                     header_parts.append(role.get("meta"))
                 header_line = " | ".join([part.strip() for part in header_parts if part])
