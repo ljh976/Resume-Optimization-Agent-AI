@@ -383,6 +383,7 @@ if run_clicked or run_requested:
         st.session_state['running'] = True
         st.session_state['summary_fix_attempted'] = False
         st.session_state['prescreen_result'] = None
+        st.session_state['loop_scores'] = []
         _clear_cached_result()
         # progress UI: small progress bar and elapsed timer (persist via session_state)
         st.session_state['run_start_ts'] = time.time()
@@ -776,6 +777,11 @@ with sidebar_col:
                     st.write("- " + t)
     if "result" in st.session_state:
         resume, fb = st.session_state.result
+        loop_scores = st.session_state.get("loop_scores") or []
+        if loop_scores:
+            with st.expander("Loop Scores", expanded=True):
+                for entry in loop_scores:
+                    st.write(f"iter {entry.get('iter')}: {entry.get('score')}")
         with st.expander("Recruiter Feedback", expanded=True):
             st.write(fb["verbal_feedback"])
             st.markdown("**Strengths**")
