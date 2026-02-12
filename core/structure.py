@@ -196,8 +196,12 @@ def split_experience(lines):
                         "bullets": []
                     }
                     continue
-        elif l.startswith("-") and current:
-            current["bullets"].append(l[1:].strip())
+        elif current:
+            stripped = (l or "").lstrip()
+            if stripped.startswith("-"):
+                current["bullets"].append(stripped[1:].strip())
+            elif stripped.startswith("•"):
+                current["bullets"].append(stripped[1:].strip())
     if current:
         roles.append(current)
     return roles
@@ -205,15 +209,39 @@ def split_experience(lines):
 
 def merge_skills_a1(lines):
     buckets, order = {}, []
+    passthrough = []
     for l in lines:
-        if ":" in l:
-            cat, rest = l.split(":", 1)
+        if not isinstance(l, str):
+            continue
+        raw = l.strip()
+        if not raw:
+            continue
+
+        # Support both ASCII ':' and full-width '：'.
+        delim = None
+        if ":" in raw:
+            delim = ":"
+        elif "：" in raw:
+            delim = "："
+
+        if delim:
+            cat, rest = raw.split(delim, 1)
             cat = cat.strip()
             items = [i.strip() for i in rest.split(",") if i.strip()]
-            if cat not in buckets:
-                buckets[cat] = []
-                order.append(cat)
-            buckets[cat].extend(items)
+            if cat:
+                if cat not in buckets:
+                    buckets[cat] = []
+                    order.append(cat)
+                if items:
+                    buckets[cat].extend(items)
+                else:
+                    # Preserve category-only lines instead of dropping them.
+                    passthrough.append(f"{cat}:")
+            else:
+                passthrough.append(raw)
+        else:
+            # Preserve malformed/non-standard skills lines instead of dropping all content.
+            passthrough.append(raw)
 
     merged, i = [], 0
     while i < len(order):
@@ -226,5 +254,12 @@ def merge_skills_a1(lines):
         else:
             merged.append(f"{cat}: " + ", ".join(items))
             i += 1
+
+    # If parsing did not produce structured category lines, keep original text.
+    if not merged and passthrough:
+        return passthrough
+
+    # Keep any non-standard lines so SKILLS content is not lost in DOCX.
+    merged.extend(passthrough)
     return merged
  

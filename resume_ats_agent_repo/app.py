@@ -69,6 +69,120 @@ st.session_state.setdefault('test_mode', True)
 # When True, avoid any programmatic trimming so content is preserved
 DISABLE_PROGRAMMATIC_TRIMS = True
 
+
+def _truncate_structured_resume(resume_text: str, cap: int = 2750) -> str:
+    """Section-aware truncation used for the final hard character cap."""
+    if not resume_text:
+        return ""
+    if len(resume_text) <= cap:
+        return resume_text.rstrip()
+
+    try:
+        secs = parse_resume(resume_text)
+    except Exception:
+        return resume_text[:cap].rstrip()
+
+    header_lines = secs.get('HEADER', []) or []
+    summary_lines = (secs.get('SUMMARY', []) or secs.get('PROFESSIONAL SUMMARY', []) or []).copy()
+    exp_lines = (secs.get('EXPERIENCE', []) or secs.get('PROFESSIONAL EXPERIENCE', []) or []).copy()
+    skills_lines = (secs.get('SKILLS', []) or []).copy()
+    edu_lines = (secs.get('EDUCATION', []) or []).copy()
+
+    def _build() -> str:
+        parts = []
+        parts.append('HEADER')
+        parts.extend(header_lines)
+        parts.append('SUMMARY')
+        parts.extend(summary_lines)
+        parts.append('EXPERIENCE')
+        parts.extend(exp_lines)
+        parts.append('SKILLS')
+        parts.extend(skills_lines)
+        parts.append('EDUCATION')
+        parts.extend(edu_lines)
+        return "\n".join([p for p in parts if p is not None and str(p).strip() != ""]).strip()
+
+    def _is_bullet(line: str) -> bool:
+        s = (line or "").lstrip()
+        return s.startswith('-') or s.startswith('•')
+
+    min_summary = 1 if summary_lines else 0
+    min_exp = 1 if exp_lines else 0
+    min_skills = 1 if skills_lines else 0
+    min_edu = 1 if edu_lines else 0
+
+    def _drop_last(arr, *, min_keep: int) -> bool:
+        if len(arr) <= min_keep:
+            return False
+        arr.pop(-1)
+        return True
+
+    def _drop_last_matching(arr, pred, *, min_keep: int) -> bool:
+        if len(arr) <= min_keep:
+            return False
+        for i in range(len(arr) - 1, -1, -1):
+            if pred(arr[i]):
+                arr.pop(i)
+                return True
+        return False
+
+    def _shrink_skills_items_once(*, max_len_hint: int = 140) -> bool:
+        nonlocal skills_lines
+        if not skills_lines:
+            return False
+        try:
+            idx = max(range(len(skills_lines)), key=lambda i: len((skills_lines[i] or "").strip()))
+        except Exception:
+            return False
+        line = (skills_lines[idx] or "").strip()
+        if not line or len(line) <= max_len_hint:
+            return False
+        delim = ":" if ":" in line else ("：" if "：" in line else None)
+        if not delim:
+            return False
+        cat, rest = line.split(delim, 1)
+        cat = cat.strip()
+        items = [i.strip() for i in (rest or "").split(",") if i.strip()]
+        if not cat or len(items) <= 1:
+            return False
+        items.pop(-1)
+        skills_lines[idx] = f"{cat}: " + ", ".join(items)
+        return True
+
+    safety = 0
+    while len(_build()) > cap and safety < 900:
+        safety += 1
+        changed = False
+
+        changed = _shrink_skills_items_once() or changed
+        if changed:
+            continue
+
+        changed = _drop_last_matching(exp_lines, _is_bullet, min_keep=min_exp) or changed
+        if changed:
+            continue
+
+        changed = _drop_last_matching(exp_lines, lambda x: not _is_bullet(x), min_keep=min_exp) or changed
+        if changed:
+            continue
+
+        changed = _drop_last(skills_lines, min_keep=min_skills) or changed
+        if changed:
+            continue
+
+        changed = _drop_last(summary_lines, min_keep=min_summary) or changed
+        if changed:
+            continue
+
+        changed = _drop_last(edu_lines, min_keep=min_edu) or changed
+        if not changed:
+            break
+
+    built = _build()
+    if len(built) > cap:
+        return built[:cap].rstrip()
+    return built
+
 def _get_docx_bytes(resume_text):
     import io, tempfile
     try:
@@ -633,6 +747,10 @@ if run_clicked or run_requested:
                 current_score = int(fb.get('ats_score') or 0)
                 if current_score >= int(target):
                     break
+                prev_resume = resume
+                prev_fb = dict(fb or {})
+                prev_len = len(resume or "")
+                prev_score = current_score
                 _update_progress(30 + int((it + 1) / max_iters * 30), f"Improving score (iter {it+1}/{max_iters})")
                 fb_update = dict(fb or {})
                 fb_update['improve_score'] = True
@@ -661,11 +779,64 @@ if run_clicked or run_requested:
                         fb = evaluate(jd, resume)
                     except Exception:
                         pass
+
+                # Guardrail: prevent iterations that aggressively shorten content without score gain.
+                try:
+                    new_score = int((fb or {}).get('ats_score') or 0)
+                    new_len = len(resume or "")
+                    if (prev_len - new_len) >= 250 and new_score <= prev_score:
+                        resume = prev_resume
+                        fb = prev_fb
+                except Exception:
+                    pass
                 _update_progress(30 + int((it + 1) / max_iters * 30), f"ATS score: {fb.get('ats_score')}")
         except Exception as e:
             _report_error("Improvement loop failed", e)
 
         # Programmatic trimming / one-page reduction has been removed by user request.
+
+        # If the resume is too short to visually fill one page in DOCX, do a single
+        # repopulation pass that is allowed to restore factual bullets from MASTER.
+        try:
+            fill_min_chars = 2450
+            fill_target_chars = 2700
+            max_one_page_chars = 12000
+            if len(resume) < fill_min_chars:
+                import copy
+                resume_before_fill = resume
+                fb_before_fill = copy.deepcopy(fb) if isinstance(fb, dict) else fb
+                fb_fill = dict(fb or {})
+                fb_fill['allow_repopulate_from_master'] = True
+                fb_fill['repopulate_target_chars'] = int(fill_target_chars)
+                fb_fill['lock_summary'] = True
+                fb_fill.setdefault('preserve_style', True)
+                fb_fill['prefer_shorten'] = False
+                try:
+                    raw_fill = _safe_call(rewrite, jd, master, resume, fb_fill, timeout=60)
+                except Exception:
+                    raw_fill = rewrite(jd, master, resume, fb_fill)
+                parsed_fill, remaining_fill = _extract_json_blob_and_rest(raw_fill)
+                if parsed_fill is not None:
+                    if isinstance(parsed_fill, dict):
+                        fb.update(parsed_fill)
+                    resume = remaining_fill.strip()
+                else:
+                    resume = raw_fill
+                # Re-evaluate once after fill
+                try:
+                    fb = _safe_call(evaluate, jd, resume, None, timeout=40)
+                except Exception:
+                    try:
+                        fb = evaluate(jd, resume)
+                    except Exception:
+                        pass
+                # Guardrail: if fill overshoots one-page-oriented char budget,
+                # rollback to the pre-fill version (no extra API call needed).
+                if len(resume) > max_one_page_chars:
+                    resume = resume_before_fill
+                    fb = fb_before_fill
+        except Exception:
+            pass
 
         st.session_state.result = (resume, fb)
         try:

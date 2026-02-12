@@ -144,7 +144,7 @@ st.session_state.setdefault('test_mode', True)
 DISABLE_PROGRAMMATIC_TRIMS = True
 
 def _get_docx_bytes(resume_text):
-    import io, tempfile
+    import tempfile
     try:
         secs = parse_resume(resume_text)
         roles_local = split_experience(secs.get('EXPERIENCE', []))
@@ -153,6 +153,7 @@ def _get_docx_bytes(resume_text):
         secs = {'EXPERIENCE': [], 'SKILLS': []}
         roles_local = []
         skills_local = []
+
     try:
         # If parsing produced no useful structured sections (e.g., the model only emitted SKILLS
         # but no EXPERIENCE/SUMMARY/EDUCATION), fall back to rendering the raw resume text to
@@ -161,12 +162,11 @@ def _get_docx_bytes(resume_text):
         for sname in ('SUMMARY', 'EXPERIENCE', 'EDUCATION'):
             if secs.get(sname):
                 useful_sections += 1
-        # If no useful body sections and only SKILLS (or only HEADER+SKILLS), fallback
         if useful_sections == 0:
             from docx import Document
             doc = Document()
             p = doc.add_paragraph()
-            p.add_run(resume_text)
+            p.add_run(resume_text or "")
             with tempfile.NamedTemporaryFile(suffix='.docx', delete=False) as tf:
                 tmp_path = tf.name
             doc.save(tmp_path)
@@ -190,6 +190,312 @@ def _get_docx_bytes(resume_text):
         return data
     except Exception:
         return None
+
+
+def _estimate_resume_lines(resume_text: str) -> int:
+    """Estimate Word line usage for a structured resume.
+
+    Excludes name + contact line (HEADER content). Used only as a heuristic to
+    enforce a one-page constraint via a 40-line budget.
+    """
+    try:
+        secs = parse_resume(resume_text or "")
+        roles_local = split_experience(secs.get("EXPERIENCE", []) or secs.get("PROFESSIONAL EXPERIENCE", []) or [])
+        merged_skills_local = merge_skills_a1(secs.get("SKILLS", []) or [])
+    except Exception:
+        return len([l for l in (resume_text or "").splitlines() if l.strip()])
+
+    def _wrap_penalty(text: str, threshold: int = 125) -> int:
+        t = (text or "").strip()
+        if not t:
+            return 0
+        if len(t) <= threshold:
+            return 0
+        if len(t) <= threshold * 2:
+            return 1
+        return 2
+
+    lines = 0
+
+    # SUMMARY
+    if secs.get("SUMMARY") or secs.get("PROFESSIONAL SUMMARY"):
+        lines += 1
+        lines += len(secs.get("SUMMARY", []) or secs.get("PROFESSIONAL SUMMARY", []) or [])
+
+    # EXPERIENCE
+    if secs.get("EXPERIENCE") or secs.get("PROFESSIONAL EXPERIENCE"):
+        lines += 1
+        if roles_local:
+            for r in roles_local:
+                lines += 1
+                for b in (r.get("bullets") or []):
+                    lines += 1 + _wrap_penalty(b)
+        else:
+            exp_lines = secs.get("EXPERIENCE", []) or secs.get("PROFESSIONAL EXPERIENCE", []) or []
+            for l in exp_lines:
+                s = (l or "").strip()
+                if not s:
+                    continue
+                if s.startswith("-") or s.startswith("•"):
+                    lines += 1 + _wrap_penalty(s[1:].strip())
+                else:
+                    lines += 1
+
+    # SKILLS
+    if secs.get("SKILLS"):
+        lines += 1
+        lines += len([l for l in merged_skills_local if isinstance(l, str) and l.strip()])
+
+    # EDUCATION
+    if secs.get("EDUCATION"):
+        lines += 1
+        lines += len([l for l in (secs.get("EDUCATION", []) or []) if isinstance(l, str) and l.strip()])
+
+    # Baseline overhead: Word paragraph spacing + underline rendering + minor wrap variance.
+    # Empirically this tends to add ~2 lines beyond our plain-text line estimate.
+    baseline_overhead = 2
+    return int(lines + baseline_overhead)
+
+
+def _trim_resume_to_max_lines(resume_text: str, max_lines: int = 40) -> str:
+    """Deterministically trim a structured resume to fit within `max_lines`.
+
+    Priority is to drop EXPERIENCE bullets first, then SKILLS, then SUMMARY,
+    keeping sections present whenever possible.
+    """
+    try:
+        secs = parse_resume(resume_text or "")
+        header_lines = secs.get('HEADER', []) or []
+        summary_lines = (secs.get('SUMMARY', []) or secs.get('PROFESSIONAL SUMMARY', []) or []).copy()
+        exp_lines = (secs.get('EXPERIENCE', []) or secs.get('PROFESSIONAL EXPERIENCE', []) or []).copy()
+        skills_lines = merge_skills_a1(secs.get('SKILLS', []) or [])
+        edu_lines = (secs.get('EDUCATION', []) or []).copy()
+    except Exception:
+        kept = []
+        for l in (resume_text or "").splitlines():
+            if l.strip():
+                kept.append(l)
+            if len(kept) >= max_lines:
+                break
+        return "\n".join(kept).strip()
+
+    roles_local = split_experience(exp_lines)
+
+    def _build_from_roles(roles_list, summary_subset, skills_subset, edu_subset):
+        parts = []
+        parts.append('HEADER')
+        parts.extend(header_lines)
+        parts.append('SUMMARY')
+        parts.extend(summary_subset)
+        parts.append('EXPERIENCE')
+        if roles_list:
+            for r in roles_list:
+                hdr = ""
+                if r.get('company') and r.get('meta'):
+                    hdr = f"{r.get('company')} | {r.get('meta')}"
+                elif r.get('company'):
+                    hdr = str(r.get('company'))
+                elif r.get('meta'):
+                    hdr = str(r.get('meta'))
+                if hdr:
+                    parts.append(hdr)
+                for b in (r.get('bullets') or []):
+                    parts.append('- ' + str(b).strip())
+        else:
+            parts.extend(exp_lines)
+        parts.append('SKILLS')
+        parts.extend([l for l in (skills_subset or []) if isinstance(l, str) and l.strip()])
+        parts.append('EDUCATION')
+        parts.extend([l for l in (edu_subset or []) if isinstance(l, str) and l.strip()])
+        return "\n".join([p for p in parts if p is not None and str(p).strip() != ""]).strip()
+
+    safety = 0
+    while _estimate_resume_lines(_build_from_roles(roles_local, summary_lines, skills_lines, edu_lines)) > max_lines and safety < 500:
+        safety += 1
+        changed = False
+
+        # Drop last EXPERIENCE bullet (keep at least 1 bullet per role when possible)
+        for ri in range(len(roles_local) - 1, -1, -1):
+            bl = roles_local[ri].get('bullets') or []
+            if len(bl) > 1:
+                bl.pop(-1)
+                roles_local[ri]['bullets'] = bl
+                changed = True
+                break
+        if changed:
+            continue
+
+        # Drop a SKILLS line
+        if skills_lines and len(skills_lines) > 1:
+            skills_lines = skills_lines[:-1]
+            changed = True
+        if changed:
+            continue
+
+        # Drop SUMMARY line but keep at least 3 if present
+        if summary_lines and len(summary_lines) > 3:
+            summary_lines = summary_lines[:-1]
+            changed = True
+        if changed:
+            continue
+
+        # Drop a whole role only if it has no bullets left (avoid collapsing experience)
+        for ri in range(len(roles_local) - 1, -1, -1):
+            bl = roles_local[ri].get('bullets') or []
+            if len(bl) <= 1 and len(roles_local) > 1:
+                roles_local.pop(ri)
+                changed = True
+                break
+        if changed:
+            continue
+
+        # As last resort, drop EDUCATION lines but keep at least 1
+        if edu_lines and len(edu_lines) > 1:
+            edu_lines = edu_lines[:-1]
+            changed = True
+        if not changed:
+            break
+
+    return _build_from_roles(roles_local, summary_lines, skills_lines, edu_lines)
+
+
+def _truncate_structured_resume(resume_text: str, cap: int = 12000) -> str:
+    """Emergency-only cap for extreme outputs; keeps structured headers if possible."""
+    if not resume_text:
+        return ""
+    if len(resume_text) <= cap:
+        return resume_text.rstrip()
+
+    try:
+        secs = parse_resume(resume_text)
+    except Exception:
+        return resume_text[:cap].rstrip()
+
+    header_lines = secs.get('HEADER', []) or []
+    summary_lines = (secs.get('SUMMARY', []) or secs.get('PROFESSIONAL SUMMARY', []) or []).copy()
+    exp_lines = (secs.get('EXPERIENCE', []) or secs.get('PROFESSIONAL EXPERIENCE', []) or []).copy()
+    skills_lines = (secs.get('SKILLS', []) or []).copy()
+    edu_lines = (secs.get('EDUCATION', []) or []).copy()
+
+    def _build() -> str:
+        parts = []
+        parts.append('HEADER')
+        parts.extend(header_lines)
+        parts.append('SUMMARY')
+        parts.extend(summary_lines)
+        parts.append('EXPERIENCE')
+        parts.extend(exp_lines)
+        parts.append('SKILLS')
+        parts.extend(skills_lines)
+        parts.append('EDUCATION')
+        parts.extend(edu_lines)
+        return "\n".join([p for p in parts if p is not None and str(p).strip() != ""]).strip()
+
+    def _is_bullet(line: str) -> bool:
+        s = (line or "").lstrip()
+        return s.startswith('-') or s.startswith('•')
+
+    min_summary = 1 if summary_lines else 0
+    min_exp = 1 if exp_lines else 0
+    min_skills = 1 if skills_lines else 0
+    min_edu = 1 if edu_lines else 0
+
+    def _shrink_skills_items_once(*, max_len_hint: int = 140) -> bool:
+        """Prefer trimming SKILLS items (fine-grained) over dropping whole bullets.
+
+        This reduces the chance we overshoot far below `cap` by removing an entire
+        long EXPERIENCE bullet or role header.
+        """
+        nonlocal skills_lines
+        if not skills_lines:
+            return False
+
+        # Pick the longest skills line as the best candidate to shrink.
+        try:
+            idx = max(range(len(skills_lines)), key=lambda i: len((skills_lines[i] or "").strip()))
+        except Exception:
+            return False
+
+        line = (skills_lines[idx] or "").strip()
+        if not line:
+            return False
+        if len(line) <= max_len_hint:
+            return False
+
+        delim = None
+        if ":" in line:
+            delim = ":"
+        elif "：" in line:
+            delim = "："
+        if not delim:
+            return False
+
+        cat, rest = line.split(delim, 1)
+        cat = cat.strip()
+        items = [i.strip() for i in (rest or "").split(",") if i.strip()]
+        if not cat or len(items) <= 1:
+            # If we cannot shrink this line further, allow dropping a whole SKILLS line later.
+            return False
+
+        # Drop trailing items until the line is shorter (one item per call).
+        items.pop(-1)
+        skills_lines[idx] = f"{cat}: " + ", ".join(items)
+        return True
+
+    def _drop_last(arr, *, min_keep: int) -> bool:
+        if len(arr) <= min_keep:
+            return False
+        arr.pop(-1)
+        return True
+
+    def _drop_last_matching(arr, pred, *, min_keep: int) -> bool:
+        if len(arr) <= min_keep:
+            return False
+        for i in range(len(arr) - 1, -1, -1):
+            if pred(arr[i]):
+                arr.pop(i)
+                return True
+        return False
+
+    safety = 0
+    while len(_build()) > cap and safety < 800:
+        safety += 1
+        changed = False
+
+        # First: attempt fine-grained SKILLS shrinking to avoid large content drops.
+        changed = _shrink_skills_items_once() or changed
+        if changed:
+            continue
+
+        # Prefer dropping EXPERIENCE bullets first
+        changed = _drop_last_matching(exp_lines, _is_bullet, min_keep=min_exp) or changed
+        if changed:
+            continue
+
+        # Then non-bullet EXPERIENCE lines
+        changed = _drop_last_matching(exp_lines, lambda x: not _is_bullet(x), min_keep=min_exp) or changed
+        if changed:
+            continue
+
+        # Then SKILLS
+        changed = _drop_last(skills_lines, min_keep=min_skills) or changed
+        if changed:
+            continue
+
+        # Then SUMMARY
+        changed = _drop_last(summary_lines, min_keep=min_summary) or changed
+        if changed:
+            continue
+
+        # Then EDUCATION
+        changed = _drop_last(edu_lines, min_keep=min_edu) or changed
+        if not changed:
+            break
+
+    built = _build()
+    if len(built) > cap:
+        return built[:cap].rstrip()
+    return built
 
 
 # Helper: compute total years from parsed roles (derive earliest start and latest end)
@@ -220,7 +526,6 @@ def _compute_total_years_from_roles(roles):
             except Exception:
                 pass
 
-        # fallback: find any years in meta
         ys = year_re.findall(meta)
         if ys:
             try:
@@ -686,6 +991,10 @@ if run_clicked or run_requested:
                 current_score = int(fb.get('ats_score') or 0)
                 if current_score >= int(target):
                     break
+                prev_resume = resume
+                prev_fb = dict(fb or {})
+                prev_len = len(resume or "")
+                prev_score = current_score
                 _update_progress(30 + int((it + 1) / max_iters * 30), f"Improving score (iter {it+1}/{max_iters})")
                 fb_update = dict(fb or {})
                 fb_update['improve_score'] = True
@@ -714,28 +1023,100 @@ if run_clicked or run_requested:
                         fb = evaluate(jd, resume)
                     except Exception:
                         pass
+
+                # Guardrail: prevent iterations that aggressively shorten content without score gain.
+                try:
+                    new_score = int((fb or {}).get('ats_score') or 0)
+                    new_len = len(resume or "")
+                    if (prev_len - new_len) >= 250 and new_score <= prev_score:
+                        resume = prev_resume
+                        fb = prev_fb
+                except Exception:
+                    pass
                 _update_progress(30 + int((it + 1) / max_iters * 30), f"ATS score: {fb.get('ats_score')}")
         except Exception as e:
             _report_error("Improvement loop failed", e)
 
         # Programmatic trimming / one-page reduction has been removed by user request.
 
-        # Final length optimization to keep resume under 2345 chars (LLM-first).
-        if len(resume) > 2345:
-            try:
-                fb_trim = dict(fb or {})
-                fb_trim['prefer_shorten'] = True
-                raw_trim = _safe_call(trimmer, jd, normalized_master, resume, fb_trim, timeout=60)
-                parsed_trim, remaining_trim = _extract_json_blob_and_rest(raw_trim)
-                if parsed_trim is not None and isinstance(parsed_trim, dict):
-                    fb.update(parsed_trim)
-                    resume = remaining_trim.strip()
+        # If the resume is too short to visually fill one page in DOCX, do a single
+        # repopulation pass that is allowed to restore factual bullets from MASTER.
+        # This avoids "underfilled" pages without changing formatting.
+        try:
+            # If output is getting too short, run one repopulation pass to restore factual content.
+            fill_min_chars = 2450
+            fill_target_chars = 2700
+            max_one_page_chars = 12000
+            if len(resume) < fill_min_chars:
+                import copy
+                resume_before_fill = resume
+                fb_before_fill = copy.deepcopy(fb) if isinstance(fb, dict) else fb
+                fb_fill = dict(fb or {})
+                fb_fill['allow_repopulate_from_master'] = True
+                fb_fill['repopulate_target_chars'] = int(fill_target_chars)
+                fb_fill['lock_summary'] = True
+                fb_fill.setdefault('preserve_style', True)
+                fb_fill['prefer_shorten'] = False
+                try:
+                    raw_fill = _safe_call(rewrite, jd, normalized_master, resume, fb_fill, timeout=60)
+                except Exception:
+                    raw_fill = rewrite(jd, normalized_master, resume, fb_fill)
+                parsed_fill, remaining_fill = _extract_json_blob_and_rest(raw_fill)
+                if parsed_fill is not None:
+                    if isinstance(parsed_fill, dict):
+                        fb.update(parsed_fill)
+                    resume = remaining_fill.strip()
                 else:
-                    resume = raw_trim
-            except Exception:
-                pass
-            if len(resume) > 2345:
-                resume = resume[:2345].rstrip()
+                    resume = raw_fill
+                # Re-evaluate once after fill so the UI score/feedback matches the final text
+                try:
+                    fb = _safe_call(evaluate, jd, resume, None, timeout=40)
+                except Exception:
+                    try:
+                        fb = evaluate(jd, resume)
+                    except Exception:
+                        pass
+                # Guardrail: rollback only if something went wildly wrong and output exploded.
+                if len(resume) > max_one_page_chars:
+                    resume = resume_before_fill
+                    fb = fb_before_fill
+        except Exception:
+            pass
+
+        # Final length guardrail (character-based): enforce a hard cap for consistent one-page behavior.
+        # Uses section-aware truncation to preserve the structured format.
+        try:
+            final_char_cap = 2750
+            if len(resume) > final_char_cap:
+                # Best-effort: ask the trimmer to shorten wording instead of dropping whole bullets.
+                try:
+                    fb_trim = dict(fb or {})
+                    fb_trim['prefer_shorten'] = True
+                    fb_trim['trim_to_chars'] = int(final_char_cap)
+                    fb_trim['lock_summary'] = True
+                    raw_trim = _safe_call(trimmer, jd, normalized_master, resume, fb_trim, timeout=60)
+                    parsed_trim, remaining_trim = _extract_json_blob_and_rest(raw_trim)
+                    if parsed_trim is not None and isinstance(parsed_trim, dict):
+                        fb.update(parsed_trim)
+                        resume = remaining_trim.strip()
+                    else:
+                        resume = raw_trim
+                except Exception:
+                    pass
+
+                # Deterministic fallback: if we still exceed the cap, truncate section-aware.
+                if len(resume) > final_char_cap:
+                    resume = _truncate_structured_resume(resume, cap=final_char_cap)
+        except Exception:
+            pass
+
+        # Emergency-only guardrail: extremely large outputs are capped deterministically.
+        try:
+            emergency_cap_chars = 12000
+            if len(resume) > emergency_cap_chars:
+                resume = _truncate_structured_resume(resume, cap=emergency_cap_chars)
+        except Exception:
+            pass
 
         st.session_state.result = (resume, fb)
         try:

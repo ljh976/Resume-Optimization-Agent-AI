@@ -14,6 +14,10 @@ Hard rules:
 Behavioral rules:
 - Prefer merging similar bullets or shortening phrases (remove filler words,
   reduce prepositional clauses) before deleting entire bullets.
+- Space efficiency (IMPORTANT): Optimize bullets for Word/DOCX wrapping.
+  - Aim for most bullets to fit on a single line at 11pt (roughly <= 130 characters excluding the bullet marker).
+  - If a bullet is slightly too long and would create an "orphan" wrap (1 word on the next line), shorten/rephrase to avoid that.
+  - If a bullet must be multi-line, ensure the last line is not a single orphan word; rebalance phrasing so the wrap looks intentional.
 - Where deletion is necessary, mark removed bullets in the `change_log` with
   `action: "removed"` and include `ids` and a short `reason`.
 - When shortening, supply the chosen short phrasing inline in the returned resume.
