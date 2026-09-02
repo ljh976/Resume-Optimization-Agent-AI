@@ -6,7 +6,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
-from .structure import parse_resume
+from .scoring import technical_skill_coverage
 
 
 class PrescreenResult(BaseModel):
@@ -17,33 +17,14 @@ class PrescreenResult(BaseModel):
 
 
 def _simple_skill_match(jd: str, resume: str) -> int:
-    jd_lc = (jd or "").lower()
-    resume_lc = (resume or "").lower()
-
-    skills = []
-    try:
-        sections = parse_resume(resume)
-        skills_lines = sections.get("SKILLS", []) or []
-        for line in skills_lines:
-            if ":" in line:
-                _, rest = line.split(":", 1)
-                skills.extend([s.strip().lower() for s in rest.split(",") if s.strip()])
-            else:
-                skills.extend([s.strip().lower() for s in line.split(",") if s.strip()])
-    except Exception:
-        skills = []
-
-    if not skills:
-        return 0
-
-    matched = sum(1 for s in skills if s and s in jd_lc)
-    return int(round((matched / float(len(skills))) * 100))
+    coverage, _, _ = technical_skill_coverage(jd, resume)
+    return int(round(coverage * 100))
 
 
 def prescreen_resume(jd: str, resume: str, use_llm: bool = True) -> Dict:
     if not use_llm:
         skill_match_pct = _simple_skill_match(jd, resume)
-        viable = skill_match_pct >= 20
+        viable = skill_match_pct >= 15
         tips = []
         if not viable:
             tips = [
@@ -64,7 +45,7 @@ def prescreen_resume(jd: str, resume: str, use_llm: bool = True) -> Dict:
     format_instructions = parser.get_format_instructions()
 
     prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are a strict recruiter doing a quick prescreen."),
+        ("system", "You are a practical recruiter doing a quick prescreen."),
         ("human", """
 JD:
 {jd}
@@ -72,7 +53,9 @@ JD:
 Resume:
 {resume}
 
-Decide if the resume is worth optimizing for this JD. Focus on skill alignment.
+        Decide if the resume is worth optimizing for this JD. Focus on core skill and domain alignment.
+        A partial match is viable when the candidate has transferable experience; mark it non-viable only
+        when the core job family or essential skills are clearly unrelated.
 Return JSON only. {format_instructions}
 """)
     ])

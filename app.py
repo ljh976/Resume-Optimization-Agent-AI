@@ -4,6 +4,7 @@ from core.header_extract import extract_header_info, build_header_lines
 from core.prescreen import prescreen_resume
 from core.structure import parse_resume, split_experience, merge_skills_a1
 from core.render import render_docx
+from core.input_extract import extract_job_description, JDExtractionError
 # relevance scorer
 # per-bullet LLM scorer removed to reduce LLM calls; use heuristic scoring if needed
 # static career pages list
@@ -83,7 +84,7 @@ def _save_persisted_state():
                 'resume': resume_text,
                 'fb': fb_serializable,
                 'input_hash': _inputs_hash(
-                    st.session_state.get('jd_input') or "",
+                    st.session_state.get('_effective_jd') or st.session_state.get('jd_input') or "",
                     st.session_state.get('master_input') or ""
                 )
             }
@@ -109,8 +110,14 @@ def _clear_cached_result():
         pass
 
 def _on_input_change():
+    st.session_state.pop('_effective_jd', None)
     _clear_cached_result()
     _save_persisted_state()
+
+
+def _on_jd_upload_change():
+    st.session_state.pop('_effective_jd', None)
+    _clear_cached_result()
 
 def _normalize_master_with_header(master_text: str, header_info: dict) -> str:
     header_lines = build_header_lines(header_info or {})
@@ -131,6 +138,8 @@ _load_persisted_state()
 if st.session_state.pop('pending_input_clear', False):
     st.session_state['jd_input'] = ''
     st.session_state['master_input'] = ''
+    st.session_state.pop('jd_file', None)
+    st.session_state.pop('_effective_jd', None)
     try:
         _save_persisted_state()
     except Exception:
@@ -608,9 +617,45 @@ st.session_state.setdefault('run_requested', False)
 with main_col:
     st.subheader("Inputs")
     with st.expander("Job Description", expanded=True):
-        jd = st.text_area("Job Description", height=220, key="jd_input", on_change=_save_persisted_state)
+        jd_file = st.file_uploader(
+            "Upload Job Description (optional)",
+            type=["pdf", "docx", "txt"],
+            key="jd_file",
+            on_change=_on_jd_upload_change,
+            disabled=st.session_state.get('running', False),
+            help="PDF, DOCX, or TXT. When a file is uploaded, manual JD entry is disabled.",
+        )
+        jd_upload_error = None
+        if jd_file is not None:
+            try:
+                if jd_file.size > 10 * 1024 * 1024:
+                    raise JDExtractionError("The JD file is larger than the 10 MB limit.")
+                jd = extract_job_description(jd_file.name, jd_file.getvalue())
+                st.session_state['_effective_jd'] = jd
+                st.text_area(
+                    "Job Description",
+                    value=jd,
+                    height=220,
+                    disabled=True,
+                    help="This text was extracted from the uploaded file. Remove the file to type manually.",
+                )
+                st.caption(f"Using {jd_file.name} ({len(jd):,} extracted characters)")
+            except JDExtractionError as exc:
+                jd = ""
+                jd_upload_error = str(exc)
+                st.text_area(
+                    "Job Description",
+                    value="",
+                    height=220,
+                    disabled=True,
+                    help="Remove the unreadable file to return to manual entry.",
+                )
+                st.error(jd_upload_error)
+        else:
+            st.session_state.pop('_effective_jd', None)
+            jd = st.text_area("Job Description", height=220, key="jd_input", on_change=_on_input_change)
     with st.expander("Master Resume", expanded=True):
-        master = st.text_area("Master Resume", height=320, key="master_input", on_change=_save_persisted_state)
+        master = st.text_area("Master Resume", height=320, key="master_input", on_change=_on_input_change)
 
     # Place Run Agent under the Master Resume field as requested
     def _on_run_click():
@@ -644,7 +689,14 @@ with main_col:
 
 with sidebar_col:
     st.header("Controls")
-    target = st.slider("Target ATS Score", 60, 95, 80, disabled=st.session_state.get('running', False))
+    target = st.slider(
+        "Target ATS Score",
+        55,
+        90,
+        75,
+        help="75 is a strong practical match; 85+ usually requires unusually close alignment.",
+        disabled=st.session_state.get('running', False),
+    )
     max_iters = st.slider("Max Iterations", 1, 6, 1, disabled=st.session_state.get('running', False))
     # One-page trimming removed per user request. Keep UI minimal.
     auto_trim = False
@@ -1192,6 +1244,12 @@ with sidebar_col:
                             except Exception:
                                 sval = str(val)
                             st.write(f"- **{labels.get(key,key)}**: {sval}")
+                    required_count = bd.get("required_skill_count")
+                    matched_count = bd.get("matched_skill_count")
+                    if required_count:
+                        st.caption(
+                            f"Detected JD technologies matched: {matched_count or 0}/{required_count}"
+                        )
             except Exception:
                 pass
 

@@ -60,6 +60,7 @@ python -m streamlit run app.py
 
 ## Features ✨
 - Clean Streamlit UI for interactive feedback and downloads (DOCX + optional PDF).  
+- Job descriptions can be pasted or uploaded as PDF, DOCX, or TXT files.
 - Resume parsing rules that enforce strict SKILLS / EXPERIENCE formatting.  
 - Evaluate / score function returns a structured JSON (for testing and integration).  
 - LangChain-based pre-screening to stop low-signal runs early.  

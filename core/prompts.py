@@ -103,6 +103,10 @@ BOLD MARKUP (optional but preferred): When marking tokens with `{BOLD_START}`/`{
 # If dates are ambiguous or missing, do NOT state a numeric years-of-experience value in SUMMARY; instead use non-numeric phrasing like 'experienced' or omit years entirely.
 
 EVAL_PROMPT = """Evaluate this resume vs the JD as a recruiter.
+Use a practical, evidence-based scale: 90+ is exceptional near-complete alignment,
+75-89 is a strong interview-worthy match, 60-74 is a plausible partial match, and
+below 60 has material gaps. Do not require every preferred qualification or a metric
+in every bullet. Do not reward keyword stuffing or claims unsupported by the resume.
 Return JSON:
 {
   "ats_score": number (0-100),

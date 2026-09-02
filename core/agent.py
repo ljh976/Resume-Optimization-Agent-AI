@@ -3,6 +3,7 @@ import os, json
 from openai import OpenAI
 from .prompts import SYSTEM_BASE, DRAFT_PROMPT, EVAL_PROMPT, REWRITE_PROMPT
 from .trimming_prompt import TRIM_PROMPT
+from .scoring import keyword_coverage, technical_skill_coverage
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -32,32 +33,13 @@ def _heuristic_ats_score(jd: str, resume: str, fb: dict = None):
     except Exception:
         parse_resume = None
 
-    jd_lc = (jd or "").lower()
-    resume_lc = (resume or "").lower()
-
     import re
 
-    jd_tokens = set(re.findall(r"\w{4,}", jd_lc))
-    resume_tokens = set(re.findall(r"\w{4,}", resume_lc))
-    kw_match = len(jd_tokens & resume_tokens) / float(len(jd_tokens)) if jd_tokens else 0.0
-
-    skill_match = 0.0
-    try:
-        if parse_resume:
-            secs = parse_resume(resume)
-            skills_lines = secs.get("SKILLS", [])
-            skills = []
-            for line in skills_lines:
-                if ":" in line:
-                    _, rest = line.split(":", 1)
-                    skills.extend([s.strip().lower() for s in rest.split(",") if s.strip()])
-            skills = [s for s in skills if s]
-            total_skills = len(skills)
-            if total_skills:
-                matched = sum(1 for s in skills if s and s in jd_lc)
-                skill_match = matched / float(total_skills)
-    except Exception:
-        skill_match = 0.0
+    # Score recall against meaningful JD terms and JD-required technologies. The
+    # former implementation divided by every skill on the resume, which unfairly
+    # penalized candidates for having a broad skill set.
+    kw_match = keyword_coverage(jd, resume)
+    skill_match, required_skills, matched_skills = technical_skill_coverage(jd, resume)
 
     bullet_avg = None
     try:
@@ -90,8 +72,11 @@ def _heuristic_ats_score(jd: str, resume: str, fb: dict = None):
             avg_words = sum(word_counts) / float(len(word_counts))
             metric_frac = sum(1 for b in bullets if re.search(r"\d|%|AUC|x\.|x\s|k\b", b, re.I)) / float(len(bullets))
             verbs = [
-                "led", "improved", "reduced", "increased", "built", "implemented",
-                "optimized", "designed", "shipped", "automated", "mentored", "owned", "managed"
+                "achieved", "architected", "automated", "built", "created", "delivered",
+                "deployed", "designed", "developed", "drove", "enhanced", "established",
+                "implemented", "improved", "increased", "launched", "led", "managed",
+                "mentored", "migrated", "modernized", "optimized", "owned", "reduced",
+                "scaled", "shipped", "streamlined", "transformed",
             ]
             verb_frac = sum(1 for b in bullets if any(v in b.lower() for v in verbs)) / float(len(bullets))
     except Exception:
@@ -99,21 +84,28 @@ def _heuristic_ats_score(jd: str, resume: str, fb: dict = None):
         metric_frac = 0.0
         verb_frac = 0.0
 
-    avg_words_norm = min(avg_words / 15.0, 1.0)
-    quality_score = 0.5 * metric_frac + 0.3 * avg_words_norm + 0.2 * verb_frac
+    avg_words_norm = min(avg_words / 12.0, 1.0)
+    metric_norm = min(metric_frac / 0.4, 1.0)
+    verb_norm = min(verb_frac / 0.7, 1.0)
+    # Quantified impact matters, but it is not realistic or desirable for every
+    # bullet to contain a number. A small baseline also prevents prose-only roles
+    # from being treated as zero-quality content.
+    quality_score = 0.2 + 0.3 * metric_norm + 0.25 * avg_words_norm + 0.25 * verb_norm if bullets else 0.0
 
     kw_score = max(0.0, min(1.0, kw_match))
     sk_score = max(0.0, min(1.0, skill_match))
     bs_score = bullet_avg if bullet_avg is not None else 0.5
     qs_score = max(0.0, min(1.0, quality_score))
 
-    heuristic = 0.35 * sk_score + 0.25 * bs_score + 0.15 * kw_score + 0.25 * qs_score
+    heuristic = 0.30 * sk_score + 0.25 * bs_score + 0.25 * kw_score + 0.20 * qs_score
     breakdown = {
         "keyword_coverage": round(kw_score * 100, 1),
         "skill_coverage": round(sk_score * 100, 1),
         "bullet_relevance_avg": round(bs_score * 100, 1),
         "quality_score": round(qs_score * 100, 1),
-        "heuristic_score": round(heuristic * 100, 1)
+        "heuristic_score": round(heuristic * 100, 1),
+        "required_skill_count": len(required_skills),
+        "matched_skill_count": len(matched_skills),
     }
     return int(round(heuristic * 100)), breakdown
 
