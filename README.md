@@ -97,7 +97,7 @@ Design notes: Keep prompts and output shape stable (JSON schema) so consumers ca
 ---
 
 ## License & Contact
-- [MIT License](LICENSE) (change as required).  
+- [MIT License](LICENSE)
 - Maintainer: Junho. For questions or review, open an issue or contact the repo owner.
 
 ---
