@@ -3,6 +3,36 @@
 A focused, practical agent that analyzes and rewrites resumes to optimize their match to specific job descriptions (JDs) and improve job relevance. Built as a compact Streamlit app and a small LLM-driven core, it demonstrates prompt engineering, parsing, and deterministic post-processing suitable for production-grade resume-to-JD optimization tooling.
 
 ---
+## Workflow
+
+1. Input Job Description and Resume
+
+Enter the job description and your resume to generate a tailored analysis.
+
+<img width="1336" height="1452" alt="image" src="https://github.com/user-attachments/assets/022c3df9-e31c-4be1-9fd2-126d67e1ca55" />
+
+
+2. Review Results and Export
+
+Review the generated optimization results and export the updated resume.
+
+<img width="1591" height="1876" alt="image" src="https://github.com/user-attachments/assets/c638ea8d-f38b-4a69-9dde-7ed8f048558b" />
+
+3. Review Generated Feedback
+
+View detailed feedback and recommendations based on the job description.
+
+<img width="607" height="1848" alt="image" src="https://github.com/user-attachments/assets/da9eae0d-1c8b-4d50-b7dc-9b57acbcbbb4" />
+
+
+4. Generated Opimized Reumse
+
+Review the Optimized Resume
+
+<img width="1272" height="1588" alt="image" src="https://github.com/user-attachments/assets/d04de9bc-0e5e-4f7f-a5d5-682fe08e3f18" />
+
+
+---
 
 ## Executive summary
 - Purpose: Automatically rewrite and optimize resumes to maximize alignment with specific job descriptions (JDs) and recommend best-fit roles.  
