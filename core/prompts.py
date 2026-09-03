@@ -46,6 +46,11 @@ Primary intent: Produce a competitively-worded, JD-focused resume that highlight
 impact, scope, and measurable outcomes appropriate to the candidate's seniority.
 Do NOT invent employers, dates, or certifications. Base all factual claims on the
 MASTER resume content when available.
+- The finished resume must substantially fill one US Letter page, not look sparse or overflow to page two.
+  Aim for roughly 52-58 estimated rendered lines and usually 2,900-3,500 characters of resume text.
+- Preserve every employer/role from MASTER unless it is clearly unrelated and space is genuinely full.
+- For a multi-page MASTER, retain enough factual bullets to fill the page: normally 4-6 bullets for
+  the most recent/relevant role and 2-4 for earlier roles. Do not collapse rich experience to 1-2 bullets.
 Important output contract (strict):
 
 - Return ONLY the structured resume text using the EXACT section headers shown
@@ -164,13 +169,13 @@ You will receive a JSON object labeled FEEDBACK. You MUST follow it.
 - Unless `prefer_shorten` is true: Do NOT reduce content volume.
   - Do NOT remove roles, bullets, or entire sections.
   - Preserve (or increase) the number of bullets per role; rewrite for clarity/keyword alignment instead of deleting.
-- If `allow_repopulate_from_master` is true: You MAY re-introduce factual bullets/phrases from MASTER that were omitted.
+- If `allow_repopulate_from_master` is true: You MUST re-introduce enough factual bullets/phrases from MASTER to reach the requested page-fill target.
   - NEVER invent facts (employers, titles, dates, certifications, or numeric metrics not present in MASTER).
   - Prefer adding the most JD-relevant bullets first, and keep formatting rules (bullets start with '- ').
   - Do NOT add new section headers or change section names.
   - Keep SUMMARY stable; prioritize adding/restoring content in EXPERIENCE and optionally SKILLS.
 - If `repopulate_target_chars` is provided (int): Aim to increase the resume text length toward this minimum, without exceeding ~12000 characters total.
-  - Add content primarily by restoring 1–2 JD-relevant bullets per role or adding one extra bullet to the most relevant roles.
+  - Keep restoring JD-relevant MASTER bullets across roles until the target is reached; do not stop after only one addition when the page remains sparse.
   - Keep SUMMARY at exactly 3–4 short lines; do not bloat SUMMARY to add length.
 
 ### OUTPUT:

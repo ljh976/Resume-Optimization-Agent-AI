@@ -4,7 +4,13 @@ from core.header_extract import extract_header_info, build_header_lines
 from core.prescreen import prescreen_resume
 from core.structure import parse_resume, split_experience, merge_skills_a1
 from core.render import render_docx
-from core.input_extract import extract_job_description, JDExtractionError
+from core.render_pdf import render_pdf_bytes
+from core.input_extract import extract_uploaded_text, InputExtractionError
+from core.content_guard import (
+    count_experience_bullets,
+    estimate_resume_lines,
+    restore_omitted_master_bullets,
+)
 # relevance scorer
 # per-bullet LLM scorer removed to reduce LLM calls; use heuristic scoring if needed
 # static career pages list
@@ -85,7 +91,7 @@ def _save_persisted_state():
                 'fb': fb_serializable,
                 'input_hash': _inputs_hash(
                     st.session_state.get('_effective_jd') or st.session_state.get('jd_input') or "",
-                    st.session_state.get('master_input') or ""
+                    st.session_state.get('_effective_master') or st.session_state.get('master_input') or ""
                 )
             }
         else:
@@ -111,12 +117,18 @@ def _clear_cached_result():
 
 def _on_input_change():
     st.session_state.pop('_effective_jd', None)
+    st.session_state.pop('_effective_master', None)
     _clear_cached_result()
     _save_persisted_state()
 
 
 def _on_jd_upload_change():
     st.session_state.pop('_effective_jd', None)
+    _clear_cached_result()
+
+
+def _on_master_upload_change():
+    st.session_state.pop('_effective_master', None)
     _clear_cached_result()
 
 def _normalize_master_with_header(master_text: str, header_info: dict) -> str:
@@ -127,6 +139,21 @@ def _normalize_master_with_header(master_text: str, header_info: dict) -> str:
         return master_text
     header_block = "\n".join(header_lines)
     return header_block + "\n" + master_text
+
+
+def _enforce_header_block(resume_text: str, header_info: dict) -> str:
+    """Keep name and the complete contact row in a stable two-line header."""
+    canonical_header = build_header_lines(header_info or {})
+    if len(canonical_header) < 2:
+        return resume_text
+    lines = [line.rstrip() for line in (resume_text or "").splitlines() if line.strip()]
+    summary_index = next(
+        (index for index, line in enumerate(lines) if line.strip().upper() == "SUMMARY"),
+        None,
+    )
+    if summary_index is None:
+        return resume_text
+    return "\n".join(canonical_header + lines[summary_index:]).strip()
 
 def _clear_inputs():
     st.session_state['pending_input_clear'] = True
@@ -139,7 +166,9 @@ if st.session_state.pop('pending_input_clear', False):
     st.session_state['jd_input'] = ''
     st.session_state['master_input'] = ''
     st.session_state.pop('jd_file', None)
+    st.session_state.pop('master_file', None)
     st.session_state.pop('_effective_jd', None)
+    st.session_state.pop('_effective_master', None)
     try:
         _save_persisted_state()
     except Exception:
@@ -201,72 +230,19 @@ def _get_docx_bytes(resume_text):
         return None
 
 
-def _estimate_resume_lines(resume_text: str) -> int:
-    """Estimate Word line usage for a structured resume.
-
-    Excludes name + contact line (HEADER content). Used only as a heuristic to
-    enforce a one-page constraint via a 40-line budget.
-    """
+def _get_pdf_bytes(resume_text):
     try:
-        secs = parse_resume(resume_text or "")
-        roles_local = split_experience(secs.get("EXPERIENCE", []) or secs.get("PROFESSIONAL EXPERIENCE", []) or [])
-        merged_skills_local = merge_skills_a1(secs.get("SKILLS", []) or [])
+        return render_pdf_bytes(resume_text)
     except Exception:
-        return len([l for l in (resume_text or "").splitlines() if l.strip()])
-
-    def _wrap_penalty(text: str, threshold: int = 125) -> int:
-        t = (text or "").strip()
-        if not t:
-            return 0
-        if len(t) <= threshold:
-            return 0
-        if len(t) <= threshold * 2:
-            return 1
-        return 2
-
-    lines = 0
-
-    # SUMMARY
-    if secs.get("SUMMARY") or secs.get("PROFESSIONAL SUMMARY"):
-        lines += 1
-        lines += len(secs.get("SUMMARY", []) or secs.get("PROFESSIONAL SUMMARY", []) or [])
-
-    # EXPERIENCE
-    if secs.get("EXPERIENCE") or secs.get("PROFESSIONAL EXPERIENCE"):
-        lines += 1
-        if roles_local:
-            for r in roles_local:
-                lines += 1
-                for b in (r.get("bullets") or []):
-                    lines += 1 + _wrap_penalty(b)
-        else:
-            exp_lines = secs.get("EXPERIENCE", []) or secs.get("PROFESSIONAL EXPERIENCE", []) or []
-            for l in exp_lines:
-                s = (l or "").strip()
-                if not s:
-                    continue
-                if s.startswith("-") or s.startswith("•"):
-                    lines += 1 + _wrap_penalty(s[1:].strip())
-                else:
-                    lines += 1
-
-    # SKILLS
-    if secs.get("SKILLS"):
-        lines += 1
-        lines += len([l for l in merged_skills_local if isinstance(l, str) and l.strip()])
-
-    # EDUCATION
-    if secs.get("EDUCATION"):
-        lines += 1
-        lines += len([l for l in (secs.get("EDUCATION", []) or []) if isinstance(l, str) and l.strip()])
-
-    # Baseline overhead: Word paragraph spacing + underline rendering + minor wrap variance.
-    # Empirically this tends to add ~2 lines beyond our plain-text line estimate.
-    baseline_overhead = 2
-    return int(lines + baseline_overhead)
+        return None
 
 
-def _trim_resume_to_max_lines(resume_text: str, max_lines: int = 40) -> str:
+def _estimate_resume_lines(resume_text: str) -> int:
+    """Estimate occupied lines in the rendered one-page resume."""
+    return estimate_resume_lines(resume_text)
+
+
+def _trim_resume_to_max_lines(resume_text: str, max_lines: int = 60) -> str:
     """Deterministically trim a structured resume to fit within `max_lines`.
 
     Priority is to drop EXPERIENCE bullets first, then SKILLS, then SUMMARY,
@@ -629,18 +605,19 @@ with main_col:
         if jd_file is not None:
             try:
                 if jd_file.size > 10 * 1024 * 1024:
-                    raise JDExtractionError("The JD file is larger than the 10 MB limit.")
-                jd = extract_job_description(jd_file.name, jd_file.getvalue())
+                    raise InputExtractionError("The JD file is larger than the 10 MB limit.")
+                jd = extract_uploaded_text(jd_file.name, jd_file.getvalue())
                 st.session_state['_effective_jd'] = jd
                 st.text_area(
                     "Job Description",
                     value=jd,
                     height=220,
                     disabled=True,
+                    label_visibility="collapsed",
                     help="This text was extracted from the uploaded file. Remove the file to type manually.",
                 )
                 st.caption(f"Using {jd_file.name} ({len(jd):,} extracted characters)")
-            except JDExtractionError as exc:
+            except InputExtractionError as exc:
                 jd = ""
                 jd_upload_error = str(exc)
                 st.text_area(
@@ -648,14 +625,63 @@ with main_col:
                     value="",
                     height=220,
                     disabled=True,
+                    label_visibility="collapsed",
                     help="Remove the unreadable file to return to manual entry.",
                 )
                 st.error(jd_upload_error)
         else:
             st.session_state.pop('_effective_jd', None)
-            jd = st.text_area("Job Description", height=220, key="jd_input", on_change=_on_input_change)
+            jd = st.text_area(
+                "Job Description",
+                height=220,
+                key="jd_input",
+                on_change=_on_input_change,
+                label_visibility="collapsed",
+            )
     with st.expander("Master Resume", expanded=True):
-        master = st.text_area("Master Resume", height=320, key="master_input", on_change=_on_input_change)
+        master_file = st.file_uploader(
+            "Upload Master Resume (optional)",
+            type=["pdf", "docx", "txt"],
+            key="master_file",
+            on_change=_on_master_upload_change,
+            disabled=st.session_state.get('running', False),
+            help="PDF, DOCX, or TXT. When a file is uploaded, manual resume entry is disabled.",
+        )
+        if master_file is not None:
+            try:
+                if master_file.size > 10 * 1024 * 1024:
+                    raise InputExtractionError("The resume file is larger than the 10 MB limit.")
+                master = extract_uploaded_text(master_file.name, master_file.getvalue())
+                st.session_state['_effective_master'] = master
+                st.text_area(
+                    "Master Resume",
+                    value=master,
+                    height=320,
+                    disabled=True,
+                    label_visibility="collapsed",
+                    help="This text was extracted from the uploaded file. Remove the file to type manually.",
+                )
+                st.caption(f"Using {master_file.name} ({len(master):,} extracted characters)")
+            except InputExtractionError as exc:
+                master = ""
+                st.text_area(
+                    "Master Resume",
+                    value="",
+                    height=320,
+                    disabled=True,
+                    label_visibility="collapsed",
+                    help="Remove the unreadable file to return to manual entry.",
+                )
+                st.error(str(exc))
+        else:
+            st.session_state.pop('_effective_master', None)
+            master = st.text_area(
+                "Master Resume",
+                height=320,
+                key="master_input",
+                on_change=_on_input_change,
+                label_visibility="collapsed",
+            )
 
     # Place Run Agent under the Master Resume field as requested
     def _on_run_click():
@@ -941,6 +967,7 @@ if run_clicked or run_requested:
             return None, s
 
         parsed_json, resume = _extract_json_blob(raw)
+        resume = _enforce_header_block(resume, header_info)
         suggested_skills_for_ui = []
         generated_bullet_scores = []
         if parsed_json and isinstance(parsed_json, dict):
@@ -998,6 +1025,7 @@ if run_clicked or run_requested:
                     resume = remaining_fix.strip()
                 else:
                     resume = raw_fix
+                resume = _enforce_header_block(resume, header_info)
 
         except Exception as e:
             _report_error("Summary validation failed", e)
@@ -1066,6 +1094,7 @@ if run_clicked or run_requested:
                     resume = remaining_rewrite.strip()
                 else:
                     resume = raw_rewrite
+                resume = _enforce_header_block(resume, header_info)
 
                 # re-evaluate after this improvement rewrite
                 try:
@@ -1076,11 +1105,17 @@ if run_clicked or run_requested:
                     except Exception:
                         pass
 
-                # Guardrail: prevent iterations that aggressively shorten content without score gain.
+                # Guardrail: score gains must not come from hollowing out the resume.
                 try:
                     new_score = int((fb or {}).get('ats_score') or 0)
                     new_len = len(resume or "")
-                    if (prev_len - new_len) >= 250 and new_score <= prev_score:
+                    prev_lines = _estimate_resume_lines(prev_resume)
+                    new_lines = _estimate_resume_lines(resume)
+                    shortened_too_far = new_len < int(prev_len * 0.85) or new_lines < prev_lines - 3
+                    visibly_underfilled = prev_lines >= 36 and new_lines < 34
+                    if (prev_len - new_len) >= 250 and (
+                        new_score <= prev_score or shortened_too_far or visibly_underfilled
+                    ):
                         resume = prev_resume
                         fb = prev_fb
                 except Exception:
@@ -1091,15 +1126,26 @@ if run_clicked or run_requested:
 
         # Programmatic trimming / one-page reduction has been removed by user request.
 
-        # If the resume is too short to visually fill one page in DOCX, do a single
-        # repopulation pass that is allowed to restore factual bullets from MASTER.
-        # This avoids "underfilled" pages without changing formatting.
+        # Fill a US Letter page based on estimated rendered lines, not a low fixed
+        # character threshold. If the model still under-fills, restore omitted
+        # factual MASTER bullets deterministically.
         try:
-            # If output is getting too short, run one repopulation pass to restore factual content.
-            fill_min_chars = 2450
-            fill_target_chars = 2700
-            max_one_page_chars = 12000
-            if len(resume) < fill_min_chars:
+            master_lines = _estimate_resume_lines(normalized_master)
+            master_is_long = (
+                master_lines >= 36
+                or len(normalized_master) >= 3200
+                or len(normalized_master.split()) >= 480
+            )
+            fill_min_lines = 52 if master_is_long else max(30, min(master_lines, 52))
+            fill_target_lines = 56 if master_is_long else max(fill_min_lines, min(master_lines, 56))
+            fill_target_chars = min(
+                3400,
+                max(2900, int(len(normalized_master) * 0.50), len(resume) + 450),
+            )
+            before_fill_lines = _estimate_resume_lines(resume)
+            before_fill_bullets = count_experience_bullets(resume)
+            content_changed = False
+            if before_fill_lines < fill_min_lines:
                 import copy
                 resume_before_fill = resume
                 fb_before_fill = copy.deepcopy(fb) if isinstance(fb, dict) else fb
@@ -1120,45 +1166,100 @@ if run_clicked or run_requested:
                     resume = remaining_fill.strip()
                 else:
                     resume = raw_fill
-                # Re-evaluate once after fill so the UI score/feedback matches the final text
-                try:
-                    fb = _safe_call(evaluate, jd, resume, None, timeout=40)
-                except Exception:
-                    try:
-                        fb = evaluate(jd, resume)
-                    except Exception:
-                        pass
-                # Guardrail: rollback only if something went wildly wrong and output exploded.
-                if len(resume) > max_one_page_chars:
+                resume = _enforce_header_block(resume, header_info)
+                filled_lines = _estimate_resume_lines(resume)
+                filled_bullets = count_experience_bullets(resume)
+                # A fill pass may rephrase, but must actually add usable content.
+                if (
+                    len(resume) > 12000
+                    or filled_lines < before_fill_lines
+                    or filled_lines > 60
+                    or len(resume) > 3600
+                    or filled_bullets < before_fill_bullets
+                ):
                     resume = resume_before_fill
                     fb = fb_before_fill
+                else:
+                    content_changed = resume != resume_before_fill
+
+            if _estimate_resume_lines(resume) < fill_target_lines:
+                restored_resume, restored_count = restore_omitted_master_bullets(
+                    resume,
+                    normalized_master,
+                    jd,
+                    target_lines=fill_target_lines,
+                    max_lines=60,
+                    max_chars=3600,
+                )
+                if restored_count:
+                    resume = restored_resume
+                    content_changed = True
+
+            # Bound an overfull result without returning to the old 2,750-char
+            # guillotine. Prefer wording compression, then trim only enough tail
+            # content to reach the calibrated 60-line/3,600-character envelope.
+            if _estimate_resume_lines(resume) > 60 or len(resume) > 3600:
+                resume_before_fit = resume
+                bullets_before_fit = count_experience_bullets(resume)
+                fitted = None
+                try:
+                    fb_fit = dict(fb or {})
+                    fb_fit['prefer_shorten'] = True
+                    fb_fit['trim_to_chars'] = 3400
+                    fb_fit['lock_summary'] = True
+                    raw_fit = _safe_call(trimmer, jd, normalized_master, resume, fb_fit, timeout=60)
+                    parsed_fit, remaining_fit = _extract_json_blob_and_rest(raw_fit)
+                    candidate = remaining_fit.strip() if parsed_fit is not None else raw_fit
+                    candidate = _enforce_header_block(candidate, header_info)
+                    candidate_lines = _estimate_resume_lines(candidate)
+                    candidate_bullets = count_experience_bullets(candidate)
+                    minimum_bullets = max(6, int(bullets_before_fit * 0.75))
+                    if 50 <= candidate_lines <= 60 and len(candidate) <= 3600 and candidate_bullets >= minimum_bullets:
+                        fitted = candidate
+                except Exception:
+                    fitted = None
+
+                if fitted is None:
+                    fitted = _truncate_structured_resume(resume_before_fit, cap=3600)
+                    if _estimate_resume_lines(fitted) > 60:
+                        fitted = _trim_resume_to_max_lines(fitted, max_lines=60)
+                    fitted = _enforce_header_block(fitted, header_info)
+                resume = fitted
+                content_changed = resume != resume_before_fit or content_changed
+
+            # Re-evaluate once after all additions so score and feedback match.
+            if content_changed:
+                try:
+                    fb = _safe_call(evaluate, jd, resume, fb, timeout=40)
+                except Exception:
+                    try:
+                        fb = evaluate(jd, resume, fb)
+                    except Exception:
+                        pass
+            if isinstance(fb, dict):
+                fb['length_breakdown'] = {
+                    'estimated_lines': _estimate_resume_lines(resume),
+                    'target_lines': fill_target_lines,
+                    'master_estimated_lines': master_lines,
+                    'experience_bullets': count_experience_bullets(resume),
+                }
         except Exception:
             pass
 
-        # Final length guardrail (character-based): enforce a hard cap for consistent one-page behavior.
-        # Uses section-aware truncation to preserve the structured format.
+        # Last-resort deterministic fit. Keep this outside the fill/rewrite block
+        # so a transient evaluator or model error cannot leave a two-page result.
         try:
-            final_char_cap = 2750
-            if len(resume) > final_char_cap:
-                # Best-effort: ask the trimmer to shorten wording instead of dropping whole bullets.
-                try:
-                    fb_trim = dict(fb or {})
-                    fb_trim['prefer_shorten'] = True
-                    fb_trim['trim_to_chars'] = int(final_char_cap)
-                    fb_trim['lock_summary'] = True
-                    raw_trim = _safe_call(trimmer, jd, normalized_master, resume, fb_trim, timeout=60)
-                    parsed_trim, remaining_trim = _extract_json_blob_and_rest(raw_trim)
-                    if parsed_trim is not None and isinstance(parsed_trim, dict):
-                        fb.update(parsed_trim)
-                        resume = remaining_trim.strip()
-                    else:
-                        resume = raw_trim
-                except Exception:
-                    pass
-
-                # Deterministic fallback: if we still exceed the cap, truncate section-aware.
-                if len(resume) > final_char_cap:
-                    resume = _truncate_structured_resume(resume, cap=final_char_cap)
+            if _estimate_resume_lines(resume) > 60 or len(resume) > 3600:
+                resume = _truncate_structured_resume(resume, cap=3600)
+                if _estimate_resume_lines(resume) > 60:
+                    resume = _trim_resume_to_max_lines(resume, max_lines=60)
+                resume = _enforce_header_block(resume, header_info)
+            if isinstance(fb, dict):
+                fb.setdefault('length_breakdown', {})
+                fb['length_breakdown'].update({
+                    'estimated_lines': _estimate_resume_lines(resume),
+                    'experience_bullets': count_experience_bullets(resume),
+                })
         except Exception:
             pass
 
@@ -1377,6 +1478,13 @@ with main_col:
                 st.metric("Quality Score", qv)
         except Exception:
             pass
+        length_info = fb.get("length_breakdown") if isinstance(fb, dict) else None
+        if length_info:
+            st.caption(
+                "Estimated page fill: "
+                f"{length_info.get('estimated_lines', 0)}/{length_info.get('target_lines', 56)} lines "
+                f"- {length_info.get('experience_bullets', 0)} experience bullets"
+            )
 
         with st.expander("Optimized Resume (Preview)", expanded=True):
             # Render preview as Markdown with bolded bullet starts and bolded skill categories
@@ -1408,9 +1516,9 @@ with main_col:
                         if other_has_same:
                             break
                     if not other_has_same:
-                        parts.append('**' + _convert_bold_markers(hdr[0]) + '**')
+                        parts.append('**' + _convert_bold_markers(hdr[0]) + '**  ')
                         if len(hdr) > 1:
-                            parts.append(_convert_bold_markers(hdr[1]))
+                            parts.append(_convert_bold_markers(hdr[1]) + '  ')
                         parts.append('')
 
                 for sec in ['PROFESSIONAL SUMMARY', 'SUMMARY', 'EXPERIENCE', 'SKILLS', 'EDUCATION']:
@@ -1551,10 +1659,16 @@ with main_col:
                 preview_docx = _get_docx_bytes(resume)
             except Exception:
                 preview_docx = None
-            if preview_docx:
-                st.download_button("Download DOCX", data=preview_docx, file_name="resume.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", key="download_docx_preview")
-            else:
-                st.download_button("Download TXT", data=resume.encode('utf-8'), file_name="resume.txt", mime="text/plain", key="download_txt_preview")
+            preview_pdf = _get_pdf_bytes(resume)
+            download_cols = st.columns(2)
+            with download_cols[0]:
+                if preview_docx:
+                    st.download_button("Download DOCX", data=preview_docx, file_name="resume.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", key="download_docx_preview", use_container_width=True)
+                else:
+                    st.download_button("Download TXT", data=resume.encode('utf-8'), file_name="resume.txt", mime="text/plain", key="download_txt_preview", use_container_width=True)
+            with download_cols[1]:
+                if preview_pdf:
+                    st.download_button("Download PDF", data=preview_pdf, file_name="resume.pdf", mime="application/pdf", key="download_pdf_preview", use_container_width=True)
 
             # Recruiter feedback moved to the right column for better alignment
             # (rendered in `sidebar_col` below)
@@ -1776,7 +1890,9 @@ with main_col:
                 except Exception:
                     existing_bullets = 0
 
-                while repop_attempts < 2 and (cur_len < min_chars or total_bullets <= 1):
+                # Legacy post-render repopulation is disabled. Page filling now
+                # happens once, before the result is saved and rendered above.
+                while False and repop_attempts < 2 and (cur_len < min_chars or total_bullets <= 1):
                     repop_attempts += 1
                     fb_repop = dict(fb)
                     fb_repop['allow_repopulate_from_master'] = True

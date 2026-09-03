@@ -3,12 +3,12 @@ from io import BytesIO
 import pytest
 from docx import Document
 
-from core.input_extract import JDExtractionError, extract_job_description
+from core.input_extract import InputExtractionError, extract_uploaded_text
 
 
 def test_extract_txt_utf8():
     text = "Senior Data Engineer\nPython, SQL, and Airflow required."
-    assert extract_job_description("role.txt", text.encode("utf-8")) == text
+    assert extract_uploaded_text("role.txt", text.encode("utf-8")) == text
 
 
 def test_extract_docx_includes_paragraphs_and_tables():
@@ -20,7 +20,7 @@ def test_extract_docx_includes_paragraphs_and_tables():
     payload = BytesIO()
     document.save(payload)
 
-    result = extract_job_description("role.docx", payload.getvalue())
+    result = extract_uploaded_text("role.docx", payload.getvalue())
 
     assert "Backend Engineer" in result
     assert "Required | Python and AWS" in result
@@ -34,14 +34,14 @@ def test_extract_pdf():
     canvas.drawString(72, 720, "Platform Engineer - Kubernetes and Terraform")
     canvas.save()
 
-    result = extract_job_description("role.pdf", payload.getvalue())
+    result = extract_uploaded_text("role.pdf", payload.getvalue())
 
     assert "Platform Engineer" in result
     assert "Kubernetes" in result
 
 
 def test_rejects_unsupported_or_empty_files():
-    with pytest.raises(JDExtractionError, match="Unsupported"):
-        extract_job_description("role.rtf", b"job description")
-    with pytest.raises(JDExtractionError, match="empty"):
-        extract_job_description("role.txt", b"")
+    with pytest.raises(InputExtractionError, match="Unsupported"):
+        extract_uploaded_text("role.rtf", b"job description")
+    with pytest.raises(InputExtractionError, match="empty"):
+        extract_uploaded_text("role.txt", b"")

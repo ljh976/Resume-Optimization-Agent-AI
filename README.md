@@ -60,7 +60,9 @@ python -m streamlit run app.py
 
 ## Features ✨
 - Clean Streamlit UI for interactive feedback and downloads (DOCX + optional PDF).  
-- Job descriptions can be pasted or uploaded as PDF, DOCX, or TXT files.
+- Job descriptions and master resumes can be pasted or uploaded as PDF, DOCX, or TXT files.
+- Optimized resumes can be downloaded as DOCX or PDF.
+- Page-fill guardrails target 52-58 estimated rendered lines, enforce a 60-line/3,600-character ceiling, and restore omitted factual master-resume bullets when needed.
 - Resume parsing rules that enforce strict SKILLS / EXPERIENCE formatting.  
 - Evaluate / score function returns a structured JSON (for testing and integration).  
 - LangChain-based pre-screening to stop low-signal runs early.  

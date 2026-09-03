@@ -18,6 +18,18 @@ def parse_resume(text):
         'EDUCATION', 'SKILLS', 'PROJECTS', 'CERTIFICATIONS', 'ACHIEVEMENTS'
     ])
 
+    def _clean_line(s: str) -> str:
+        # Remove accidental JSON tokens (e.g., '{}', '[]') that the model may append,
+        # and also remove any surrounding commas/spaces so we don't leave orphan commas.
+        import re
+        if not s:
+            return s
+        out = s
+        out = re.sub(r"\s*(?:,)?\s*(?:\{\s*\}|\[\s*\])\s*(?:,)?\s*", " ", out)
+        out = re.sub(r"\s+", " ", out).strip()
+        out = re.sub(r",\s*,+", ",", out)
+        return out.strip(' ,')
+
     def _looks_like_contact_line(s: str) -> bool:
         lowered = (s or "").lower()
         if any(token in lowered for token in ("@", "linkedin", "github", "http", "www")):
@@ -50,14 +62,8 @@ def parse_resume(text):
                 rest = _clean_line(rest)
                 if rest:
                     sections["HEADER"].insert(1, rest)
-            if len(sections["HEADER"]) > 1:
-                second = sections["HEADER"][1]
-                if '|' in second and not second.lstrip().startswith('-'):
-                    left, rest = second.split('|', 1)
-                    sections["HEADER"][1] = _clean_line(left)
-                    rest = _clean_line(rest)
-                    if rest:
-                        sections["HEADER"].insert(2, rest)
+            # The second header line is the complete contact row. Keep its pipe-
+            # separated items together so DOCX/PDF renderers receive one row.
     except Exception:
         pass
 
@@ -67,22 +73,6 @@ def parse_resume(text):
     alias_map = {
         'PROFESSIONAL EXPERIENCE': 'EXPERIENCE'
     }
-
-    def _clean_line(s: str) -> str:
-        # Remove accidental JSON tokens (e.g., '{}', '[]') that the model may append,
-        # and also remove any surrounding commas/spaces so we don't leave orphan commas.
-        import re
-        if not s:
-            return s
-        out = s
-        # Remove any occurrence of {} or [] with optional surrounding commas and whitespace
-        out = re.sub(r"\s*(?:,)?\s*(?:\{\s*\}|\[\s*\])\s*(?:,)?\s*", " ", out)
-        # Collapse multiple spaces and normalize commas spacing
-        out = re.sub(r"\s+", " ", out).strip()
-        # Remove accidental leading/trailing commas and duplicate commas
-        out = re.sub(r",\s*,+", ",", out)
-        out = out.strip(' ,')
-        return out
 
     current = None
     # Allow a canonical heading to appear in the first or second line.
